@@ -42,22 +42,8 @@ Panel {
     if ((root.providers || []).length === 0 && root.errorText === "") return "No data yet"
     var n = root.configuredCount
     if (n === 0) return root.errorText !== "" ? "Fetch failed" : "No provider keys"
-    var top = -1
-    var provs = root.providers || []
-    for (var i = 0; i < provs.length; i++) {
-      var p = provs[i]
-      if (!p || !p.configured) continue
-      var ws = p.windows || []
-      for (var j = 0; j < ws.length; j++) {
-        var w = ws[j]
-        if (w && w.percent !== null && w.percent !== undefined && Number(w.percent) > top)
-          top = Number(w.percent)
-      }
-    }
-    var base = n + (n === 1 ? " subscription" : " subscriptions")
-    return top >= 0 ? base + " · peak " + Math.round(top) + "%" : base
+    return n + (n === 1 ? " subscription" : " subscriptions")
   }
-
 
   readonly property string barDisplay: String(root.setting("barDisplay", "Icon"))
   readonly property bool barShowsData: root.barDisplay.toLowerCase() === "data"
@@ -77,7 +63,7 @@ Panel {
   function compactSubText(p) {
     if (!p) return "—"
     if ((p.windows || []).length > 0) {
-      var parts = [p.display]
+      var parts = []
       for (var i = 0; i < p.windows.length; i++) {
         var w = p.windows[i]
         var pct = w && w.percent !== null && w.percent !== undefined ? Math.round(w.percent) + "%" : "—"
@@ -86,7 +72,7 @@ Panel {
       }
       return parts.join(" · ")
     }
-    return p.display + " " + (p.label || "—")
+    return p.label || "—"
   }
 
   // Ticks once a second so reset countdowns stay honest while the panel sits open.
@@ -225,19 +211,66 @@ Panel {
     }
   }
 
-  // Data mode: compact one-liner for the default sub instead of the glyph.
-  WidgetButton {
+  // Data mode: provider logo + compact one-liner for the default sub.
+  // Composed by hand because WidgetButton renders text only and cannot host
+  // an image; mirrors its tooltip, click-target registration and press
+  // behavior against the bar.
+  Item {
     id: dataButton
     anchors.fill: parent
     visible: root.barShowsData
-    bar: root.bar
-    text: root.compactSubText(root.defaultSub)
-    fontSize: Style.font.caption
-    tooltipText: "AI Subs"
-    active: root.errorText !== "" && root.errorText.indexOf("fetch-failed") === 0
-    onPressed: function (buttonCode) {
-      if (buttonCode === Qt.RightButton) root.refresh()
-      else root.toggle()
+
+    readonly property var sub: root.defaultSub
+    readonly property string chipText: root.compactSubText(sub)
+    readonly property bool failed: root.errorText !== "" && root.errorText.indexOf("fetch-failed") === 0
+    readonly property color chipColor: failed ? root.urgent : root.foreground
+
+    implicitWidth: (chipLogo.visible ? chipLogo.width + Style.space(6) : 0) + chipLabel.implicitWidth + Style.space(17)
+    implicitHeight: Math.max(chipLogo.height, chipLabel.implicitHeight)
+
+    Image {
+      id: chipLogo
+      anchors.left: parent.left
+      anchors.verticalCenter: parent.verticalCenter
+      width: Style.font.body * 1.15
+      height: width
+      visible: !!dataButton.sub && dataButton.sub.logo !== ""
+      source: visible ? Qt.resolvedUrl("assets/icons/" + dataButton.sub.logo + ".svg") : ""
+      sourceSize.width: width * 2
+      sourceSize.height: height * 2
+      fillMode: Image.PreserveAspectFit
+      mipmap: true
+    }
+
+    Text {
+      id: chipLabel
+      anchors.left: chipLogo.visible ? chipLogo.right : parent.left
+      anchors.leftMargin: chipLogo.visible ? Style.space(6) : 0
+      anchors.verticalCenter: parent.verticalCenter
+      text: dataButton.chipText
+      textFormat: Text.PlainText
+      color: dataButton.chipColor
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+    }
+
+    MouseArea {
+      id: dataMouse
+      anchors.fill: parent
+      acceptedButtons: Qt.LeftButton | Qt.RightButton
+      hoverEnabled: true
+      cursorShape: Qt.PointingHandCursor
+      onPressed: function (mouse) {
+        if (mouse.button === Qt.RightButton) root.refresh()
+        else root.toggle()
+      }
+      onContainsMouseChanged: {
+        if (!root.bar) return
+        if (containsMouse) root.bar.showTooltip(dataButton, "AI Subs")
+        else root.bar.hideTooltip(dataButton)
+      }
+      Component.onCompleted: if (root.bar && root.bar.registerClickTarget) root.bar.registerClickTarget(dataButton)
+      Component.onDestruction: if (root.bar && root.bar.unregisterClickTarget) root.bar.unregisterClickTarget(dataButton)
     }
   }
 
@@ -379,15 +412,9 @@ Panel {
           mipmap: true
         }
 
-        // Tint the mark to the theme foreground; the bundled SVGs are white
-        // so colorization maps them onto any theme cleanly.
-        MultiEffect {
-          anchors.fill: providerMark
-          source: providerMark
-          visible: badge.hasLogo && providerMark.status === Image.Ready
-          colorizationColor: Color.accent
-          colorization: 1
-        }
+
+        // The bundled SVGs carry each provider's brand color, so the image
+        // renders untinted.
       }
 
       Text {
