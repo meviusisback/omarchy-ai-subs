@@ -542,7 +542,7 @@ Panel {
 
             Text {
               id: heroIcon
-              text: "\uF06A9"
+              text: "󰚩"
               color: root.foreground
               font.family: root.fontFamily
               font.pixelSize: Style.font.display
