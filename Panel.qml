@@ -1,5 +1,5 @@
 import QtQuick
-import QtQuick.Controls
+import QtQuick.Effects
 import Quickshell
 import Quickshell.Io
 import qs.Commons
@@ -28,10 +28,35 @@ Panel {
   property var providers: []
   property bool loading: true
   property string errorText: ""
+  property bool settingsOpen: false
 
   readonly property int refreshIntervalSec: Math.max(30, Number(root.setting("refreshIntervalSec", 900)) || 900)
   readonly property string hermesEnvFile: root.setting("hermesEnvFile", "~/.hermes/.env")
   readonly property int configuredCount: (root.providers || []).filter(function (p) { return p && p.configured; }).length
+
+  // Hero subtitle under the panel title — mirrors the tracked-out caption the
+  // built-in panels show ("Audio"/volume line): live summary when data exists.
+  readonly property string heroCaption: {
+    if (root.loading) return "Fetching usage…"
+    if ((root.providers || []).length === 0 && root.errorText === "") return "No data yet"
+    var n = root.configuredCount
+    if (n === 0) return root.errorText !== "" ? "Fetch failed" : "No provider keys"
+    var top = -1
+    var provs = root.providers || []
+    for (var i = 0; i < provs.length; i++) {
+      var p = provs[i]
+      if (!p || !p.configured) continue
+      var ws = p.windows || []
+      for (var j = 0; j < ws.length; j++) {
+        var w = ws[j]
+        if (w && w.percent !== null && w.percent !== undefined && Number(w.percent) > top)
+          top = Number(w.percent)
+      }
+    }
+    var base = n + (n === 1 ? " subscription" : " subscriptions")
+    return top >= 0 ? base + " · peak " + Math.round(top) + "%" : base
+  }
+
 
   readonly property string barDisplay: String(root.setting("barDisplay", "Icon"))
   readonly property bool barShowsData: root.barDisplay.toLowerCase() === "data"
@@ -256,7 +281,14 @@ Panel {
     implicitWidth: chipLabel.implicitWidth + Style.space(10)
     implicitHeight: chipLabel.implicitHeight + Style.space(6)
     radius: height / 2
-    color: chip.selected ? root.foreground : root.alpha(root.foreground, 0.08)
+    color: chip.selected ? root.foreground : (chipMouse.containsMouse ? root.alpha(root.foreground, 0.14) : root.alpha(root.foreground, 0.08))
+    Behavior on color {
+      ColorAnimation { duration: 140 }
+    }
+    scale: chipMouse.pressed ? 0.94 : 1
+    Behavior on scale {
+      NumberAnimation { duration: 120; easing.type: Easing.OutCubic }
+    }
 
     Text {
       id: chipLabel
@@ -269,6 +301,7 @@ Panel {
     }
 
     MouseArea {
+      id: chipMouse
       anchors.fill: parent
       hoverEnabled: true
       cursorShape: Qt.PointingHandCursor
@@ -285,6 +318,21 @@ Panel {
     required property var modelData
     spacing: Style.space(4)
 
+    // Gentle rise-and-fade each time the model is (re)built, so a refresh
+    // reads as new data arriving rather than a hard swap.
+    opacity: 0
+    property bool entered: false
+    Component.onCompleted: Qt.callLater(function () { block.entered = true })
+    Behavior on opacity {
+      NumberAnimation { duration: 240; easing.type: Easing.OutCubic }
+    }
+    transform: Translate {
+      y: block.entered ? 0 : Style.space(8)
+      Behavior on y {
+        NumberAnimation { duration: 240; easing.type: Easing.OutCubic }
+      }
+    }
+
     readonly property var p: block.modelData || {}
     readonly property bool hasWindows: (block.p.windows || []).length > 0
 
@@ -294,17 +342,51 @@ Panel {
       radius: Style.cornerRadius
       color: root.alpha(root.foreground, 0.07)
 
-      Text {
+      Item {
         id: badge
         anchors.left: parent.left
         anchors.leftMargin: Style.space(10)
         anchors.verticalCenter: parent.verticalCenter
-        width: Style.space(40)
-        text: block.p.display
-        color: Color.accent
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.subtitle
-        font.bold: true
+        width: Style.space(26)
+        height: Style.space(26)
+
+        readonly property string logoSlug: block.p.logo || ""
+        readonly property bool hasLogo: logoSlug !== ""
+
+        // Letter fallback for providers without a bundled mark.
+        Text {
+          anchors.fill: parent
+          visible: !badge.hasLogo || providerMark.status !== Image.Ready
+          text: block.p.display
+          textFormat: Text.PlainText
+          color: Color.accent
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.subtitle
+          font.bold: true
+          horizontalAlignment: Text.AlignHCenter
+          verticalAlignment: Text.AlignVCenter
+        }
+
+        Image {
+          id: providerMark
+          anchors.fill: parent
+          visible: badge.hasLogo
+          source: badge.hasLogo ? Qt.resolvedUrl("assets/icons/" + badge.logoSlug + ".svg") : ""
+          sourceSize.width: width * 2
+          sourceSize.height: height * 2
+          fillMode: Image.PreserveAspectFit
+          mipmap: true
+        }
+
+        // Tint the mark to the theme foreground; the bundled SVGs are white
+        // so colorization maps them onto any theme cleanly.
+        MultiEffect {
+          anchors.fill: providerMark
+          source: providerMark
+          visible: badge.hasLogo && providerMark.status === Image.Ready
+          colorizationColor: Color.accent
+          colorization: 1
+        }
       }
 
       Text {
@@ -314,9 +396,9 @@ Panel {
         anchors.verticalCenter: parent.verticalCenter
         text: block.p.name
         textFormat: Text.PlainText
-        color: root.dim
+        color: root.foreground
         font.family: root.fontFamily
-        font.pixelSize: Style.font.caption
+        font.pixelSize: Style.font.body
         elide: Text.ElideRight
       }
 
@@ -449,69 +531,131 @@ Panel {
           width: panelFlick.width
           spacing: Style.space(12)
 
-          Text {
+          // Hero header — mirrors the built-in panels ("Audio", "Network"):
+          // title-case name over a small tracked-out status line, with the
+          // settings toggle at the right edge.
+          Item {
             width: parent.width
-            text: "AI SUBS"
-            color: root.foreground
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.subtitle
-            font.bold: true
-          }
+            implicitHeight: heroLabels.implicitHeight
 
-          Row {
-            width: parent.width
-            spacing: Style.space(8)
+            Column {
+              id: heroLabels
+              anchors.left: parent.left
+              anchors.right: settingsButton.left
+              anchors.rightMargin: Style.space(10)
+              spacing: Style.space(2)
 
-            Text {
-              anchors.verticalCenter: parent.verticalCenter
-              width: Style.space(40)
-              text: "Bar"
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
+              Text {
+                width: parent.width
+                text: "AI Subs"
+                textFormat: Text.PlainText
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.title
+                font.bold: true
+                elide: Text.ElideRight
+              }
+
+              Text {
+                width: parent.width
+                text: root.heroCaption.toUpperCase()
+                textFormat: Text.PlainText
+                color: Qt.darker(root.foreground, 1.4)
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: true
+                font.letterSpacing: 1.2
+                elide: Text.ElideRight
+              }
             }
 
             ModeChip {
-              label: "Icon"
-              selected: !root.barShowsData
-              onPicked: root.persistSetting("barDisplay", "Icon")
-            }
-
-            ModeChip {
-              label: "Data"
-              selected: root.barShowsData
-              onPicked: root.persistSetting("barDisplay", "Data")
+              id: settingsButton
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              label: "\uF013"
+              selected: root.settingsOpen
+              onPicked: root.settingsOpen = !root.settingsOpen
             }
           }
 
-          Row {
-            visible: root.barShowsData && root.configuredCount > 0
+          // Settings drawer: collapsed until the gear is pressed. Height and
+          // fade animate together so the rows below slide up smoothly.
+          Item {
             width: parent.width
-            spacing: Style.space(4)
-
-            Text {
-              anchors.verticalCenter: parent.verticalCenter
-              width: Style.space(40)
-              text: "Sub"
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
+            height: root.settingsOpen ? settingsInner.implicitHeight : 0
+            clip: true
+            enabled: root.settingsOpen
+            Behavior on height {
+              NumberAnimation { duration: 220; easing.type: Easing.OutCubic }
+            }
+            opacity: root.settingsOpen ? 1 : 0
+            Behavior on opacity {
+              NumberAnimation { duration: 180; easing.type: Easing.OutCubic }
             }
 
-            Repeater {
-              model: (root.providers || []).filter(function (p) { return p && p.configured; })
+            Column {
+              id: settingsInner
+              anchors.top: parent.top
+              width: parent.width
+              spacing: Style.space(8)
 
-              Item {
-                required property var modelData
-                width: subChip.implicitWidth
-                height: subChip.implicitHeight
+              Row {
+                width: parent.width
+                spacing: Style.space(8)
+
+                Text {
+                  anchors.verticalCenter: parent.verticalCenter
+                  width: Style.space(40)
+                  text: "Bar"
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
 
                 ModeChip {
-                  id: subChip
-                  anchors.fill: parent
-                  label: modelData ? modelData.display : "—"
-                  selected: root.defaultSubId === (modelData ? modelData.id : "")
-                  onPicked: if (modelData) root.persistSetting("defaultSub", modelData.id)
+                  label: "Icon"
+                  selected: !root.barShowsData
+                  onPicked: root.persistSetting("barDisplay", "Icon")
+                }
+
+                ModeChip {
+                  label: "Data"
+                  selected: root.barShowsData
+                  onPicked: root.persistSetting("barDisplay", "Data")
+                }
+              }
+
+              Row {
+                visible: root.barShowsData && root.configuredCount > 0
+                width: parent.width
+                spacing: Style.space(4)
+
+                Text {
+                  anchors.verticalCenter: parent.verticalCenter
+                  width: Style.space(40)
+                  text: "Sub"
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+
+                Repeater {
+                  model: (root.providers || []).filter(function (p) { return p && p.configured; })
+
+                  Item {
+                    required property var modelData
+                    width: subChip.implicitWidth
+                    height: subChip.implicitHeight
+
+                    ModeChip {
+                      id: subChip
+                      anchors.fill: parent
+                      label: modelData ? modelData.display : "—"
+                      selected: root.defaultSubId === (modelData ? modelData.id : "")
+                      onPicked: if (modelData) root.persistSetting("defaultSub", modelData.id)
+                    }
+                  }
                 }
               }
             }

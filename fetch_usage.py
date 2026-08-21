@@ -407,19 +407,17 @@ def _fetch_claude():
 
 def _fetch_codex():
     return _fetch_collector("codex")
-
-
 PROVIDER_SPECS = [
-    {"id": "opencode", "name": "OpenCode Go", "display": "OC", "key_envs": ["OPENCODE_GO_API_KEY", "OPENCODE_ZEN_API_KEY"], "fetch": _fetch_opencode},
-    {"id": "openrouter", "name": "OpenRouter", "display": "OR", "key_envs": ["OPENROUTER_API_KEY"], "fetch": _fetch_openrouter},
-    {"id": "claude", "name": "Claude Code", "display": "CL", "local": True, "fetch": _fetch_claude},
-    {"id": "codex", "name": "Codex", "display": "CX", "local": True, "fetch": _fetch_codex},
-    {"id": "deepseek", "name": "DeepSeek", "display": "DS", "key_envs": ["DEEPSEEK_API_KEY"], "fetch": _fetch_deepseek},
-    {"id": "kimi", "name": "Kimi", "display": "KI", "key_envs": ["KIMI_API_KEY", "MOONSHOT_API_KEY"], "fetch": _fetch_kimi},
-    {"id": "novita", "name": "NovitaAI", "display": "NV", "key_envs": ["NOVITA_API_KEY"], "fetch": _fetch_novita},
-    {"id": "zai", "name": "ZAI", "display": "Z", "key_envs": ["ZAI_API_KEY", "GLM_API_KEY"], "fetch": _fetch_zai},
-    {"id": "alibaba", "name": "Alibaba", "display": "AB", "key_envs": ["DASHSCOPE_API_KEY"], "fetch": _fetch_alibaba},
-    {"id": "arcee", "name": "Arcee AI", "display": "AR", "key_envs": ["ARCEE_API_KEY"], "fetch": _fetch_arcee},
+    {"id": "opencode", "name": "OpenCode Go", "display": "OC", "logo": "opencode", "key_envs": ["OPENCODE_GO_API_KEY", "OPENCODE_ZEN_API_KEY"], "fetch": _fetch_opencode},
+    {"id": "openrouter", "name": "OpenRouter", "display": "OR", "logo": "openrouter", "key_envs": ["OPENROUTER_API_KEY"], "fetch": _fetch_openrouter},
+    {"id": "claude", "name": "Claude Code", "display": "CL", "logo": "claude", "local": True, "fetch": _fetch_claude},
+    {"id": "codex", "name": "Codex", "display": "CX", "logo": "openai", "local": True, "fetch": _fetch_codex},
+    {"id": "deepseek", "name": "DeepSeek", "display": "DS", "logo": "deepseek", "key_envs": ["DEEPSEEK_API_KEY"], "fetch": _fetch_deepseek},
+    {"id": "kimi", "name": "Kimi", "display": "KI", "logo": "kimi", "key_envs": ["KIMI_API_KEY", "MOONSHOT_API_KEY"], "fetch": _fetch_kimi},
+    {"id": "novita", "name": "NovitaAI", "display": "NV", "logo": "novita", "key_envs": ["NOVITA_API_KEY"], "fetch": _fetch_novita},
+    {"id": "zai", "name": "ZAI", "display": "Z", "logo": "zai", "key_envs": ["ZAI_API_KEY", "GLM_API_KEY"], "fetch": _fetch_zai},
+    {"id": "alibaba", "name": "Alibaba", "display": "AB", "logo": "alibabacloud", "key_envs": ["DASHSCOPE_API_KEY"], "fetch": _fetch_alibaba},
+    {"id": "arcee", "name": "Arcee AI", "display": "AR", "logo": "arcee", "key_envs": ["ARCEE_API_KEY"], "fetch": _fetch_arcee},
 ]
 
 
