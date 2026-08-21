@@ -313,6 +313,7 @@ Panel {
         anchors.rightMargin: Style.space(10)
         anchors.verticalCenter: parent.verticalCenter
         text: block.p.name
+        textFormat: Text.PlainText
         color: root.dim
         font.family: root.fontFamily
         font.pixelSize: Style.font.caption
@@ -328,6 +329,7 @@ Panel {
         anchors.rightMargin: Style.space(10)
         anchors.verticalCenter: parent.verticalCenter
         text: block.p.label || (block.p.error ? block.p.error : "—")
+        textFormat: Text.PlainText
         color: block.p.error ? root.urgent : root.foreground
         font.family: root.fontFamily
         font.pixelSize: Style.font.subtitle
@@ -360,6 +362,7 @@ Panel {
               anchors.verticalCenter: parent.verticalCenter
               width: Style.space(48)
               text: winBlock.modelData.label
+              textFormat: Text.PlainText
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
@@ -526,8 +529,8 @@ Panel {
           Text {
             visible: !root.loading && root.configuredCount === 0 && root.errorText === ""
             width: parent.width
-            topPadding: Style.space(12)
             text: "No Hermes provider keys configured in " + root.hermesEnvFile + ".\nAdd keys (e.g. OPENCODE_GO_API_KEY) to see usage."
+            textFormat: Text.PlainText
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.body
@@ -539,6 +542,7 @@ Panel {
             width: parent.width
             topPadding: Style.space(12)
             text: "Fetch failed (" + root.errorText + ").\nDetails: journalctl --user | grep hermes-usage"
+            textFormat: Text.PlainText
             color: root.urgent
             font.family: root.fontFamily
             font.pixelSize: Style.font.body

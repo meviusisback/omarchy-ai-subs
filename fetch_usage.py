@@ -56,24 +56,24 @@ def _read_key(env_name: str) -> str | None:
     return value or None
 
 
-class _SameHostRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """Follow redirects only within the same host so the Authorization
-    (API key) header is never forwarded to an unrelated origin. Cross-host
-    redirects raise HTTPError instead of leaking the bearer token."""
+class _SameOriginRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Follow redirects only within the same origin (scheme + host) so the
+    Authorization (API key) header is never forwarded elsewhere and never
+    downgraded to plaintext. Any other redirect raises HTTPError."""
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         new = urllib.request.urlparse(newurl)
         old = urllib.request.urlparse(req.full_url)
-        if new.netloc != old.netloc:
+        if (new.scheme, new.netloc) != (old.scheme, old.netloc):
             raise urllib.error.HTTPError(
-                req.full_url, code, "cross-host redirect refused", headers, fp
+                req.full_url, code, "cross-origin redirect refused", headers, fp
             )
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 _DEFAULT_SSL_CONTEXT = ssl.create_default_context()
 _OPENER = urllib.request.build_opener(
-    _SameHostRedirectHandler(),
+    _SameOriginRedirectHandler(),
     urllib.request.HTTPSHandler(context=_DEFAULT_SSL_CONTEXT),
 )
 
@@ -81,7 +81,7 @@ _OPENER = urllib.request.build_opener(
 def _request_json(url: str, api_key: str):
     # OpenCode's edge rejects the default Python-urllib User-Agent with 403,
     # so we send a browser-like one everywhere. The Authorization header is
-    # never forwarded across hosts (see _SameHostRedirectHandler).
+    # never forwarded off-origin (see _SameOriginRedirectHandler).
     request = urllib.request.Request(
         url,
         headers={
@@ -133,6 +133,17 @@ def _safe_float(value, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+_CURRENCY_RE = re.compile(r"^[A-Za-z]{3,5}$")
+
+
+def _safe_currency(value, default: str = "USD") -> str:
+    """Restrict an API-supplied currency code to a short alphanumeric token.
+    The value is rendered by QML Text labels, so anything outside the shape
+    of a currency code falls back to the default instead of reaching the UI."""
+    text = str(value or "").strip()
+    return text.upper() if _CURRENCY_RE.fullmatch(text) else default
 
 
 def _extract_balance(body, field_names, *, unwrap_data: bool = False):
@@ -196,7 +207,6 @@ def _fetch_openrouter(api_key: str):
         "detail": f"${remaining:,.2f} left of ${total:,.2f} ({pct_used:.0f}% used)",
     }
 
-
 def _fetch_deepseek(api_key: str):
     body = _request_json(DEEPSEEK_BALANCE_URL, api_key)
     infos = body.get("balance_infos") if isinstance(body, dict) else None
@@ -207,7 +217,7 @@ def _fetch_deepseek(api_key: str):
     for info in infos:
         if not isinstance(info, dict):
             continue
-        currency = info.get("currency") or currency
+        currency = _safe_currency(info.get("currency"), currency)
         total += _safe_float(info.get("total_balance"))
     value = round(total, 2)
     return {
@@ -331,7 +341,11 @@ def _short_window_label(label):
     minutes = re.search(r"(\d+)\s*m", text)
     if minutes:
         return minutes.group(1) + "m"
-    return (label or "?")[:6]
+    # Fallback: keep only markup-safe characters. The label reaches QML Text
+    # sinks (including the bar chip's WidgetButton, which renders AutoText and
+    # exposes no textFormat override), so arbitrary file content must never
+    # pass through verbatim.
+    return re.sub(r"[^A-Za-z0-9 ._-]", "", (label or ""))[:6] or "?"
 
 
 def _fetch_collector(agent_id):
@@ -369,8 +383,8 @@ def _fetch_collector(agent_id):
     if isinstance(balance, dict) and _safe_float(balance.get("funded")) > 0:
         funded = _safe_float(balance.get("funded"))
         remaining = max(0.0, _safe_float(balance.get("remaining")))
-        currency = str(balance.get("currency") or "USD")
-        symbol = "$" if currency.upper() == "USD" else currency + " "
+        currency = _safe_currency(balance.get("currency"))
+        symbol = "$" if currency == "USD" else currency + " "
         used = max(0.0, funded - remaining)
         pct_used = used / funded * 100.0
         out.update({
