@@ -36,9 +36,9 @@ USAGE_API_URL = "https://opencode.ai/zen/go/v1/usage"
 OPENROUTER_CREDITS_URL = "https://openrouter.ai/api/v1/credits"
 DEEPSEEK_BALANCE_URL = "https://api.deepseek.com/user/balance"
 KIMI_BALANCE_URL = "https://api.moonshot.cn/v1/users/me/balance"
-NOVITA_BALANCE_URL = "https://api.novita.ai/v3/account/balance"
+NOVITA_BALANCE_URL = "https://api.novita.ai/openapi/v1/billing/balance/detail"
 ZAI_BALANCE_URL = "https://open.bigmodel.cn/api/paas/v4/user/balance"
-ALIBABA_BILLING_URL = "https://dashscope.aliyuncs.com/api/v1/services/billing/usage"
+ALIBABA_BILLING_URL = "https://dashscope.aliyuncs.com/api/v1/quotas"
 ARCEE_BALANCE_URL = "https://api.arcee.ai/v2/user/balance"
 
 TIMEOUT_SECONDS = 15
@@ -56,9 +56,32 @@ def _read_key(env_name: str) -> str | None:
     return value or None
 
 
+class _SameHostRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Follow redirects only within the same host so the Authorization
+    (API key) header is never forwarded to an unrelated origin. Cross-host
+    redirects raise HTTPError instead of leaking the bearer token."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new = urllib.request.urlparse(newurl)
+        old = urllib.request.urlparse(req.full_url)
+        if new.netloc != old.netloc:
+            raise urllib.error.HTTPError(
+                req.full_url, code, "cross-host redirect refused", headers, fp
+            )
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_DEFAULT_SSL_CONTEXT = ssl.create_default_context()
+_OPENER = urllib.request.build_opener(
+    _SameHostRedirectHandler(),
+    urllib.request.HTTPSHandler(context=_DEFAULT_SSL_CONTEXT),
+)
+
+
 def _request_json(url: str, api_key: str):
     # OpenCode's edge rejects the default Python-urllib User-Agent with 403,
-    # so we send a browser-like one everywhere.
+    # so we send a browser-like one everywhere. The Authorization header is
+    # never forwarded across hosts (see _SameHostRedirectHandler).
     request = urllib.request.Request(
         url,
         headers={
@@ -67,8 +90,7 @@ def _request_json(url: str, api_key: str):
             "User-Agent": USER_AGENT,
         },
     )
-    context = ssl.create_default_context()
-    with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS, context=context) as response:
+    with _OPENER.open(request, timeout=TIMEOUT_SECONDS) as response:
         raw = response.read(MAX_RESPONSE_BYTES + 1)
         if len(raw) > MAX_RESPONSE_BYTES:
             raise ValueError("response-too-large")
@@ -199,17 +221,20 @@ def _fetch_deepseek(api_key: str):
 
 def _fetch_kimi(api_key: str):
     body = _request_json(KIMI_BALANCE_URL, api_key)
-    if not isinstance(body, dict) or "available" not in body:
+    if not isinstance(body, dict) or body.get("code") != 0:
         return {"error": "unexpected-response"}
-    available = _safe_float(body.get("available"))
-    voucher = _safe_float(body.get("voucher"))
-    cash = _safe_float(body.get("cash"))
+    data = body.get("data")
+    if not isinstance(data, dict) or "available_balance" not in data:
+        return {"error": "unexpected-response"}
+    available = _safe_float(data.get("available_balance"))
+    voucher = _safe_float(data.get("voucher_balance"))
+    cash = _safe_float(data.get("cash_balance"))
     return {
         "kind": "balance",
-        "label": f"¥{available:,.2f}",
+        "label": f"${available:,.2f}",
         "value": round(available, 2),
-        "currency": "CNY",
-        "detail": f"balance ¥{available:,.2f} (voucher ¥{voucher:,.2f}, cash ¥{cash:,.2f})",
+        "currency": "USD",
+        "detail": f"balance ${available:,.2f} (voucher ${voucher:,.2f}, cash ${cash:,.2f})",
     }
 
 
@@ -217,9 +242,11 @@ def _fetch_novita(api_key: str):
     body = _request_json(NOVITA_BALANCE_URL, api_key)
     if not isinstance(body, dict):
         return {"error": "unexpected-response"}
-    balance = _extract_balance(body, ("balance", "credits", "remaining", "available"))
-    if balance is None:
+    # Novita reports balance in 1/10000 USD, so 10000 == $1.00.
+    raw = body.get("availableBalance") or body.get("cashBalance")
+    if raw is None:
         return {"error": "unexpected-response"}
+    balance = _safe_float(raw) / 10000.0
     return {
         "kind": "balance",
         "label": f"${balance:,.2f}",
@@ -249,17 +276,25 @@ def _fetch_alibaba(api_key: str):
     body = _request_json(ALIBABA_BILLING_URL, api_key)
     if not isinstance(body, dict):
         return {"error": "unexpected-response"}
-    inner = body.get("data") if isinstance(body.get("data"), dict) else body
-    balance = _extract_balance(body, ("balance", "remaining", "available", "total_cost", "quota"), unwrap_data=True)
-    if balance is None:
+    if body.get("code") not in (None, "Success"):
         return {"error": "unexpected-response"}
-    currency = str(inner.get("currency", "CNY")) if isinstance(inner, dict) else "CNY"
+    data = body.get("data")
+    if not isinstance(data, dict):
+        return {"error": "unexpected-response"}
+    # DashScope reports account balances in USD. Prefer available credit, then
+    # credits.
+    raw = data.get("available")
+    if raw is None:
+        raw = data.get("credits")
+    if raw is None:
+        return {"error": "unexpected-response"}
+    balance = _safe_float(raw)
     return {
         "kind": "balance",
-        "label": f"{balance:,.2f} {currency}",
+        "label": f"${balance:,.2f}",
         "value": round(balance, 2),
-        "currency": currency,
-        "detail": f"balance {balance:,.2f} {currency}",
+        "currency": "USD",
+        "detail": f"balance ${balance:,.2f}",
     }
 
 
@@ -385,7 +420,12 @@ def _transport_error(exc):
 
 
 def load_hermes_dotenv(path: str) -> None:
-    """Load KEY=VALUE pairs from a Hermes .env file into os.environ."""
+    """Load KEY=VALUE pairs from a Hermes .env file into os.environ.
+
+    Handles common dotenv idioms: an optional leading ``export``, single- or
+    double-quoted values (including a ``#`` inside quotes), and a trailing
+    ``# comment`` on unquoted values.
+    """
     path = os.path.expanduser(path)
     if not os.path.isfile(path):
         return
@@ -394,11 +434,24 @@ def load_hermes_dotenv(path: str) -> None:
             line = line.strip()
             if not line or line.startswith("#") or "=" not in line:
                 continue
+            line = re.sub(r"^export\s+", "", line)
             key, _, value = line.partition("=")
             key = key.strip()
-            value = value.strip().strip('"').strip("'")
+            value = value.strip()
+            if value and value[0] in "\"'":
+                # Quoted value: capture up to the matching closing quote.
+                quote = value[0]
+                rest = value[1:]
+                end = rest.find(quote)
+                if end != -1:
+                    value = rest[:end]
+                else:
+                    value = rest
+            else:
+                # Unquoted value: the first unescaped ' #' starts a comment.
+                value = re.split(r"\s+#", value, maxsplit=1)[0].rstrip()
             if key:
-                os.environ[key] = value
+                os.environ[key] = value.strip()
 
 
 def main() -> None:
@@ -418,7 +471,12 @@ def main() -> None:
         if spec.get("local"):
             # Collector-backed provider: no API key, data comes from the
             # Omarchy agent usage records on this machine.
-            data = spec["fetch"]()
+            try:
+                data = spec["fetch"]()
+            except Exception as exc:  # noqa: BLE001 - surfaced to the UI as text
+                rec["error"] = _transport_error(exc)
+                rec["configured"] = False
+                return rec
             rec["configured"] = "error" not in data
             if "error" in data:
                 rec["error"] = data["error"]

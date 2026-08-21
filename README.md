@@ -33,10 +33,10 @@ OC · 5h 0% (4h) · W 79% (2d) · M 46% (16d)     (Data mode bar chip)
 | `CL` | Claude Code | % used per limit window + resets | none — reads Omarchy agent usage records |
 | `CX` | Codex | % used per limit window + resets | none — reads Omarchy agent usage records |
 | `DS` | DeepSeek | USD balance | `DEEPSEEK_API_KEY` |
-| `KI` | Kimi / Moonshot | CNY balance | `KIMI_API_KEY` |
+| `KI` | Kimi / Moonshot | USD balance | `KIMI_API_KEY` |
 | `NV` | NovitaAI | USD balance | `NOVITA_API_KEY` |
 | `Z` | ZAI / Zhipu | CNY balance | `ZAI_API_KEY` |
-| `AB` | Alibaba / DashScope | CNY balance | `DASHSCOPE_API_KEY` |
+| `AB` | Alibaba / DashScope | USD balance | `DASHSCOPE_API_KEY` |
 | `AR` | Arcee AI | USD balance | `ARCEE_API_KEY` |
 
 Claude and Codex need no API keys: the widget reads the usage records that
