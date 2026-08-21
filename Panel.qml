@@ -225,6 +225,15 @@ Panel {
     readonly property bool failed: root.errorText !== "" && root.errorText.indexOf("fetch-failed") === 0
     readonly property color chipColor: failed ? root.urgent : root.foreground
 
+    // The bar routes module clicks through this exact interface
+    // (Bar.pressModuleClickTarget); without it the click is treated as
+    // non-interactive and swallowed before our MouseArea sees it.
+    function triggerPress(button) {
+      if (root.bar) root.bar.hideTooltip(dataButton)
+      if (button === Qt.RightButton) root.refresh()
+      else root.toggle()
+    }
+
     implicitWidth: (chipLogo.visible ? chipLogo.width + Style.space(6) : 0) + chipLabel.implicitWidth + Style.space(17)
     implicitHeight: Math.max(chipLogo.height, chipLabel.implicitHeight)
 
@@ -259,11 +268,7 @@ Panel {
       anchors.fill: parent
       acceptedButtons: Qt.LeftButton | Qt.RightButton
       hoverEnabled: true
-      cursorShape: Qt.PointingHandCursor
-      onPressed: function (mouse) {
-        if (mouse.button === Qt.RightButton) root.refresh()
-        else root.toggle()
-      }
+      onClicked: function (mouse) { dataButton.triggerPress(mouse.button) }
       onContainsMouseChanged: {
         if (!root.bar) return
         if (containsMouse) root.bar.showTooltip(dataButton, "AI Subs")
