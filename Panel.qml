@@ -321,7 +321,7 @@ Panel {
 
     // Gentle rise-and-fade each time the model is (re)built, so a refresh
     // reads as new data arriving rather than a hard swap.
-    opacity: 0
+    opacity: block.entered ? 1 : 0
     property bool entered: false
     Component.onCompleted: Qt.callLater(function () { block.entered = true })
     Behavior on opacity {
