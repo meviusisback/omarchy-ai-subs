@@ -73,6 +73,17 @@ Providers appear as soon as their key exists — no restart needed (the fetcher
 refreshes every 15 minutes; right-click the widget or press `R` in the panel
 to refresh immediately).
 
+## Update & Remove
+
+```bash
+# Update a git-managed plugin
+omarchy plugin update meviusisback.ai-subs --yes
+
+# Remove the plugin entirely
+omarchy plugin remove meviusisback.ai-subs --yes
+```
+
+
 ## Settings
 
 Click the bar icon to open the panel:
