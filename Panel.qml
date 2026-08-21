@@ -534,15 +534,26 @@ Panel {
           spacing: Style.space(12)
 
           // Hero header — mirrors the built-in panels ("Audio", "Network"):
-          // title-case name over a small tracked-out status line, with the
-          // settings toggle at the right edge.
+          // display-size glyph, then title-case name over a small tracked-out
+          // status line, settings toggle on the trailing edge.
           Item {
             width: parent.width
-            implicitHeight: heroLabels.implicitHeight
+            implicitHeight: Math.max(heroIcon.implicitHeight, heroLabels.implicitHeight)
+
+            Text {
+              id: heroIcon
+              text: "\uF06A9"
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.display
+              anchors.left: parent.left
+              anchors.verticalCenter: parent.verticalCenter
+            }
 
             Column {
               id: heroLabels
-              anchors.left: parent.left
+              anchors.left: heroIcon.right
+              anchors.leftMargin: Style.space(14)
               anchors.right: settingsButton.left
               anchors.rightMargin: Style.space(10)
               spacing: Style.space(2)
@@ -580,6 +591,8 @@ Panel {
               onPicked: root.settingsOpen = !root.settingsOpen
             }
           }
+
+          PanelSeparator { foreground: root.foreground }
 
           // Settings drawer: collapsed until the gear is pressed. Height and
           // fade animate together so the rows below slide up smoothly.
