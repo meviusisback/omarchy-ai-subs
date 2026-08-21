@@ -392,8 +392,9 @@ Panel {
 
       Text {
         anchors.left: badge.right
-        anchors.right: valueText.visible ? valueText.left : parent.right
+        anchors.leftMargin: Style.space(8)
         anchors.rightMargin: Style.space(10)
+        anchors.right: valueText.visible ? valueText.left : parent.right
         anchors.verticalCenter: parent.verticalCenter
         text: block.p.name
         textFormat: Text.PlainText
