@@ -479,6 +479,7 @@ def main() -> None:
             "id": spec["id"],
             "name": spec["name"],
             "display": spec["display"],
+            "logo": spec.get("logo", ""),
         }
         if spec.get("local"):
             # Collector-backed provider: no API key, data comes from the
