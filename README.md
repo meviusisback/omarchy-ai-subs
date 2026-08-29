@@ -1,5 +1,7 @@
 # AI Subs for Omarchy
 
+![](infographic.png)
+
 AI subscription usage and balance directly in the Omarchy bar — meter bars,
 credit balances and live reset countdowns, for every provider you actually
 have keys for.
