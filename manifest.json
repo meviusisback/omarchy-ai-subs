@@ -5,7 +5,7 @@
   "version": "1.4.0",
   "author": "meviusisback",
   "license": "MIT",
-  "description": "AI subscription usage/balance in the Omarchy bar: OpenCode Go, OpenRouter, Claude Code, Codex, DeepSeek, Kimi, NovitaAI, ZAI, Alibaba and Arcee — meter bars, credit balances and live reset countdowns.",
+  "description": "AI subscription usage/balance in the Omarchy bar: OpenCode Go, OpenRouter, Claude Code, Codex, Command Code, DeepSeek, Kimi, NovitaAI, ZAI, Alibaba and Arcee — meter bars, credit balances and live reset countdowns.",
   "kinds": ["bar-widget"],
   "activation": "on-demand",
   "entryPoints": {
@@ -26,7 +26,7 @@
       { "key": "refreshIntervalSec", "type": "integer", "label": "Refresh interval (seconds)", "min": 30, "max": 3600, "step": 30, "defaultValue": 900 },
       { "key": "hermesEnvFile", "type": "path", "label": "Hermes .env file", "defaultValue": "~/.hermes/.env" },
       { "key": "barDisplay", "type": "enum", "label": "Bar display", "options": ["Icon", "Data"], "defaultValue": "Icon", "description": "Icon shows the Sigma glyph; Data shows a compact one-liner for the default sub." },
-      { "key": "defaultSub", "type": "enum", "label": "Default sub (Data mode)", "options": ["opencode", "openrouter", "claude", "codex", "deepseek", "kimi", "novita", "zai", "alibaba", "arcee"], "defaultValue": "opencode", "description": "Which subscription the bar shows when Bar display is Data." }
+      { "key": "defaultSub", "type": "enum", "label": "Default sub (Data mode)", "options": ["opencode", "openrouter", "claude", "codex", "commandcode", "deepseek", "kimi", "novita", "zai", "alibaba", "arcee"], "defaultValue": "opencode", "description": "Which subscription the bar shows when Bar display is Data." }
     ]
   }
 }

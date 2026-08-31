@@ -9,6 +9,9 @@ renders. Stdlib-only (urllib) so it runs under the system python3 with no deps.
 Provider mapping (display -> vendor -> metric):
   OC OpenCode Go      % used (rolling 5h / weekly / monthly)
   OR OpenRouter       USD credits remaining
+  CC Command Code     % used (rolling 5h / weekly) + USD balance remaining
+  CL Claude Code      collector-backed
+  CX Codex            collector-backed
   DS DeepSeek         USD balance
   KI Kimi/Moonshot    CNY balance
   NV NovitaAI         USD balance
@@ -40,6 +43,7 @@ NOVITA_BALANCE_URL = "https://api.novita.ai/openapi/v1/billing/balance/detail"
 ZAI_BALANCE_URL = "https://open.bigmodel.cn/api/paas/v4/user/balance"
 ALIBABA_BILLING_URL = "https://dashscope.aliyuncs.com/api/v1/quotas"
 ARCEE_BALANCE_URL = "https://api.arcee.ai/v2/user/balance"
+COMMANDCODE_CREDITS_URL = "https://api.commandcode.ai/alpha/billing/credits"
 
 TIMEOUT_SECONDS = 15
 MAX_RESPONSE_BYTES = 4096
@@ -324,6 +328,74 @@ def _fetch_arcee(api_key: str):
     }
 
 
+def _fetch_commandcode(api_key: str):
+    body = _request_json(COMMANDCODE_CREDITS_URL, api_key)
+    if not isinstance(body, dict):
+        return {"error": "unexpected-response"}
+    credits = body.get("credits") if isinstance(body.get("credits"), dict) else None
+    window_limits = body.get("windowLimits") if isinstance(body.get("windowLimits"), dict) else None
+    if credits is None and window_limits is None:
+        return {"error": "unexpected-response"}
+
+    # Monthly remaining credits (USD)
+    monthly_credits = _safe_float(credits.get("monthlyCredits")) if credits else None
+    purchased = _safe_float(credits.get("purchasedCredits")) if credits else 0.0
+    free = _safe_float(credits.get("freeCredits")) if credits else 0.0
+    total_remaining = max(0.0, (monthly_credits or 0.0) + purchased + free)
+
+    # Rolling windows: fiveHour and weekly — each has used/cap/resetAt (epoch ms)
+    windows = []
+    window_map = {"fiveHour": "5h", "weekly": "W"}
+    for raw_key, label in window_map.items():
+        wl = window_limits.get(raw_key) if isinstance(window_limits, dict) else None
+        if not isinstance(wl, dict):
+            continue
+        cap = _safe_float(wl.get("cap"))
+        used = _safe_float(wl.get("used"))
+        if cap <= 0:
+            continue
+        pct = round(min(100.0, used / cap * 100.0), 1)
+        # resetAt is epoch ms — convert to ISO string for the QML countdown
+        reset_ms = wl.get("resetAt")
+        reset_iso = None
+        if isinstance(reset_ms, (int, float)) and reset_ms > 0:
+            reset_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(reset_ms / 1000.0))
+        windows.append({
+            "id": raw_key.lower(),
+            "label": label,
+            "percent": pct,
+            "resetsAt": reset_iso,
+        })
+
+    # Rolling windows render as percent kind (like OpenCode).
+    # Show the monthly balance in the detail line.
+    if windows:
+        headline_pct = windows[0].get("percent") if windows else None
+        detail_parts = [f"{w['label']} {_pct(w['percent'])}" for w in windows]
+        if total_remaining > 0:
+            detail_parts.append(f"${total_remaining:,.2f} remaining")
+        return {
+            "kind": "percent",
+            "label": _pct(headline_pct),
+            "value": headline_pct,
+            "detail": " · ".join(detail_parts),
+            "windows": windows,
+            "monthlyCredits": round(total_remaining, 2) if total_remaining > 0 else None,
+        }
+
+    # Fallback: no rolling windows, just show balance
+    if total_remaining > 0:
+        return {
+            "kind": "balance",
+            "label": f"${total_remaining:,.2f}",
+            "value": round(total_remaining, 2),
+            "currency": "USD",
+            "detail": f"balance ${total_remaining:,.2f}",
+        }
+
+    return {"error": "no-usage-data"}
+
+
 OMARCHY_USAGE_DIR = "~/.local/state/omarchy/agents/usage"
 
 
@@ -418,6 +490,7 @@ PROVIDER_SPECS = [
     {"id": "zai", "name": "ZAI", "display": "Z", "logo": "zai", "key_envs": ["ZAI_API_KEY", "GLM_API_KEY"], "fetch": _fetch_zai},
     {"id": "alibaba", "name": "Alibaba", "display": "AB", "logo": "alibabacloud", "key_envs": ["DASHSCOPE_API_KEY"], "fetch": _fetch_alibaba},
     {"id": "arcee", "name": "Arcee AI", "display": "AR", "logo": "arcee", "key_envs": ["ARCEE_API_KEY"], "fetch": _fetch_arcee},
+    {"id": "commandcode", "name": "Command Code", "display": "CC", "logo": "commandcode", "key_envs": ["COMMANDCODE_API_KEY"], "fetch": _fetch_commandcode},
 ]
 
 
