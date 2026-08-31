@@ -45,7 +45,7 @@ Panel {
     return n + (n === 1 ? " subscription" : " subscriptions")
   }
 
-  readonly property string barDisplay: String(root.setting("barDisplay", "Icon"))
+  readonly property string barDisplay: String(root.setting("barDisplay", "Data"))
   readonly property bool barShowsData: root.barDisplay.toLowerCase() === "data"
 
   readonly property string defaultSubId: String(root.setting("defaultSub", "opencode"))
