@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import ssl
@@ -137,6 +138,17 @@ def _safe_float(value, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _finite(value, default: float = 0.0) -> float:
+    """Like _safe_float, but rejects NaN/inf.
+
+    json.dumps() emits bare NaN/Infinity for non-finite floats, which is not
+    valid JSON — QML's JSON.parse would throw on the whole document and every
+    provider block would go blank. Keep those values out of the output.
+    """
+    number = _safe_float(value, default)
+    return number if math.isfinite(number) else default
 
 
 _CURRENCY_RE = re.compile(r"^[A-Za-z]{3,5}$")
@@ -338,10 +350,12 @@ def _fetch_commandcode(api_key: str):
         return {"error": "unexpected-response"}
 
     # Monthly remaining credits (USD)
-    monthly_credits = _safe_float(credits.get("monthlyCredits")) if credits else None
-    purchased = _safe_float(credits.get("purchasedCredits")) if credits else 0.0
-    free = _safe_float(credits.get("freeCredits")) if credits else 0.0
-    total_remaining = max(0.0, (monthly_credits or 0.0) + purchased + free)
+    monthly_credits = _finite(credits.get("monthlyCredits")) if credits else None
+    purchased = _finite(credits.get("purchasedCredits")) if credits else 0.0
+    free = _finite(credits.get("freeCredits")) if credits else 0.0
+    # _finite on the sum too: two large-but-finite components can still add
+    # up to inf, which would serialize as bare Infinity.
+    total_remaining = max(0.0, _finite((monthly_credits or 0.0) + purchased + free))
 
     # Rolling windows: fiveHour and weekly — each has used/cap/resetAt (epoch ms)
     windows = []
@@ -350,16 +364,20 @@ def _fetch_commandcode(api_key: str):
         wl = window_limits.get(raw_key) if isinstance(window_limits, dict) else None
         if not isinstance(wl, dict):
             continue
-        cap = _safe_float(wl.get("cap"))
-        used = _safe_float(wl.get("used"))
+        cap = _finite(wl.get("cap"))
+        used = _finite(wl.get("used"))
         if cap <= 0:
             continue
-        pct = round(min(100.0, used / cap * 100.0), 1)
+        pct = round(min(100.0, max(0.0, used / cap * 100.0)), 1)
         # resetAt is epoch ms — convert to ISO string for the QML countdown
         reset_ms = wl.get("resetAt")
         reset_iso = None
         if isinstance(reset_ms, (int, float)) and reset_ms > 0:
-            reset_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(reset_ms / 1000.0))
+            try:
+                reset_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(reset_ms / 1000.0))
+            except (ValueError, OverflowError, OSError):
+                # Out-of-range timestamp: lose the countdown, keep the window.
+                reset_iso = None
         windows.append({
             "id": raw_key.lower(),
             "label": label,
