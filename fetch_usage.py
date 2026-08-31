@@ -118,7 +118,7 @@ def _normalize_usage(body):
             normalized[window_id] = None
             continue
         try:
-            percent = round(float(raw["percent"]), 1) if raw.get("percent") is not None else None
+            percent = round(_finite(raw["percent"]), 1) if raw.get("percent") is not None else None
         except (TypeError, ValueError):
             percent = None
         normalized[window_id] = {
@@ -166,7 +166,7 @@ def _extract_balance(body, field_names, *, unwrap_data: bool = False):
     inner = body.get("data") if unwrap_data and isinstance(body.get("data"), dict) else body
     for key in field_names:
         if key in inner:
-            return _safe_float(inner[key])
+            return _finite(inner[key])
     return None
 
 
@@ -209,8 +209,8 @@ def _fetch_openrouter(api_key: str):
     data = body.get("data") if isinstance(body, dict) else None
     if not isinstance(data, dict) or data.get("total_credits") is None or data.get("total_usage") is None:
         return {"error": "unexpected-response"}
-    total = _safe_float(data["total_credits"])
-    used = _safe_float(data["total_usage"])
+    total = _finite(data["total_credits"])
+    used = _finite(data["total_usage"])
     remaining = max(0.0, total - used)
     pct_used = (used / total * 100.0) if total > 0 else 0.0
     return {
@@ -234,7 +234,7 @@ def _fetch_deepseek(api_key: str):
         if not isinstance(info, dict):
             continue
         currency = _safe_currency(info.get("currency"), currency)
-        total += _safe_float(info.get("total_balance"))
+        total += _finite(info.get("total_balance"))
     value = round(total, 2)
     return {
         "kind": "balance",
@@ -252,9 +252,9 @@ def _fetch_kimi(api_key: str):
     data = body.get("data")
     if not isinstance(data, dict) or "available_balance" not in data:
         return {"error": "unexpected-response"}
-    available = _safe_float(data.get("available_balance"))
-    voucher = _safe_float(data.get("voucher_balance"))
-    cash = _safe_float(data.get("cash_balance"))
+    available = _finite(data.get("available_balance"))
+    voucher = _finite(data.get("voucher_balance"))
+    cash = _finite(data.get("cash_balance"))
     return {
         "kind": "balance",
         "label": f"${available:,.2f}",
@@ -272,7 +272,7 @@ def _fetch_novita(api_key: str):
     raw = body.get("availableBalance") or body.get("cashBalance")
     if raw is None:
         return {"error": "unexpected-response"}
-    balance = _safe_float(raw) / 10000.0
+    balance = _finite(raw) / 10000.0
     return {
         "kind": "balance",
         "label": f"${balance:,.2f}",
@@ -314,7 +314,7 @@ def _fetch_alibaba(api_key: str):
         raw = data.get("credits")
     if raw is None:
         return {"error": "unexpected-response"}
-    balance = _safe_float(raw)
+    balance = _finite(raw)
     return {
         "kind": "balance",
         "label": f"${balance:,.2f}",
@@ -457,7 +457,7 @@ def _fetch_collector(agent_id):
         if not isinstance(entry, dict) or entry.get("percent") is None:
             continue
         try:
-            percent = round(float(entry["percent"]), 1)
+            percent = round(_finite(entry["percent"]), 1)
         except (TypeError, ValueError):
             continue
         short = _short_window_label(entry.get("title") or entry.get("label"))
@@ -470,9 +470,9 @@ def _fetch_collector(agent_id):
         })
     balance = record.get("balance") if isinstance(record, dict) else None
     out = {"kind": "percent" if windows else "note", "windows": windows}
-    if isinstance(balance, dict) and _safe_float(balance.get("funded")) > 0:
-        funded = _safe_float(balance.get("funded"))
-        remaining = max(0.0, _safe_float(balance.get("remaining")))
+    if isinstance(balance, dict) and _finite(balance.get("funded")) > 0:
+        funded = _finite(balance.get("funded"))
+        remaining = max(0.0, _finite(balance.get("remaining")))
         currency = _safe_currency(balance.get("currency"))
         symbol = "$" if currency == "USD" else currency + " "
         used = max(0.0, funded - remaining)
