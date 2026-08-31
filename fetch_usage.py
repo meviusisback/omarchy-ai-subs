@@ -12,26 +12,37 @@ Provider mapping (display -> vendor -> metric):
   CC Command Code     % used (rolling 5h / weekly) + USD balance remaining
   CL Claude Code      collector-backed
   CX Codex            collector-backed
-  DS DeepSeek         USD balance
-  KI Kimi/Moonshot    CNY balance
+  DS DeepSeek         USD balance (env var or native config fallback)
+  KI Kimi/Moonshot    CNY balance (env var or native config fallback)
   NV NovitaAI         USD balance
   Z  ZAI/Zhipu        CNY balance
   AB Alibaba/DashScope CNY usage
   AR Arcee AI         USD balance
+  CP GitHub Copilot   % used (OAuth token, opt-in)
+  CU Cursor           USD plan spend (OAuth token, opt-in)
 """
 
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import math
 import os
 import re
 import ssl
+import stat
+import sqlite3
 import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+
+try:
+    import tomllib  # Python 3.11+
+except ImportError:
+    tomllib = None  # type: ignore[assignment]
 
 # --------------------------------------------------------------------------- #
 # Endpoints + transport
@@ -45,6 +56,11 @@ ZAI_BALANCE_URL = "https://open.bigmodel.cn/api/paas/v4/user/balance"
 ALIBABA_BILLING_URL = "https://dashscope.aliyuncs.com/api/v1/quotas"
 ARCEE_BALANCE_URL = "https://api.arcee.ai/v2/user/balance"
 COMMANDCODE_CREDITS_URL = "https://api.commandcode.ai/alpha/billing/credits"
+COPILOT_USER_URL = "https://api.github.com/copilot_internal/user"
+CURSOR_USAGE_URL = "https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage"
+
+COPILOT_EDITOR_VERSION = "OmarchyUsageMonitor/1.0"
+COPILOT_INTEGRATION_ID = "omarchy-ai-subs"
 
 TIMEOUT_SECONDS = 15
 MAX_RESPONSE_BYTES = 4096
@@ -59,6 +75,228 @@ WINDOWS = [
 def _read_key(env_name: str) -> str | None:
     value = os.environ.get(env_name, "").strip()
     return value or None
+
+
+# --------------------------------------------------------------------------- #
+# SentinelToken — OAuth token wrapper that prevents accidental leakage
+# --------------------------------------------------------------------------- #
+class SentinelToken:
+    """Wraps an OAuth token so repr/str never leak the value."""
+
+    __slots__ = ("_value",)
+
+    def __init__(self, value: str) -> None:
+        self._value = value
+
+    def __repr__(self) -> str:
+        return "<REDACTED>"
+
+    def __str__(self) -> str:
+        return "<REDACTED>"
+
+    def __bool__(self) -> bool:
+        return bool(self._value)
+
+    @property
+    def value(self) -> str:
+        return self._value
+
+
+# --------------------------------------------------------------------------- #
+# File integrity — symlink / permissions / ownership checks
+# --------------------------------------------------------------------------- #
+def _check_file_integrity(path: str, expected_dir: str) -> bool:
+    """Verify a credential file is safe to read: regular file, owned by us,
+    not world-readable/writable, and not a symlink escaping expected_dir."""
+    try:
+        real = os.path.realpath(path)
+        if not real.startswith(os.path.realpath(expected_dir) + os.sep
+                              if not os.path.isdir(os.path.realpath(expected_dir))
+                              else os.path.realpath(expected_dir) + os.sep):
+            return False
+        st = os.stat(real)
+        if not stat.S_ISREG(st.st_mode):
+            return False
+        if st.st_uid != os.getuid():
+            return False
+        if st.st_mode & 0o077:  # world- or group-readable/writable
+            return False
+        parent = os.stat(os.path.dirname(real))
+        if parent.st_mode & stat.S_IWOTH:  # parent world-writable
+            return False
+        return True
+    except OSError:
+        return False
+
+
+# --------------------------------------------------------------------------- #
+# Native credential readers — JSON and TOML
+# --------------------------------------------------------------------------- #
+_MAX_NATIVE_BYTES = 65536
+
+
+def _read_native_key(file_path: str, key_paths: list[list[str]]) -> str | None:
+    """Read an API key from a JSON auth file.  *key_paths* is a list of
+    path walks to try in order (e.g. [["opencode-go", "key"]])."""
+    expanded = os.path.expanduser(file_path)
+    expected_dir = os.path.dirname(expanded)
+    if not _check_file_integrity(expanded, expected_dir):
+        return None
+    try:
+        real = os.path.realpath(os.path.expanduser(file_path))
+        if not os.path.isfile(real):
+            return None
+        if os.path.getsize(real) > _MAX_NATIVE_BYTES:
+            return None
+        with open(real, "r", encoding="utf-8") as fh:
+            raw = fh.read(_MAX_NATIVE_BYTES + 1)
+        if len(raw) > _MAX_NATIVE_BYTES:
+            return None
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            return None
+    except (OSError, json.JSONDecodeError, ValueError):
+        return None
+
+    for path in key_paths:
+        val = data
+        for segment in path:
+            if not isinstance(val, dict):
+                val = None
+                break
+            val = val.get(segment)
+        if isinstance(val, str) and val:
+            return val
+    return None
+
+
+def _read_toml_key(file_path: str, key_path: list[str]) -> str | None:
+    """Read an API key from a TOML config file (DeepSeek, Kimi)."""
+    if tomllib is None:
+        return None
+    expanded = os.path.expanduser(file_path)
+    expected_dir = os.path.dirname(expanded)
+    if not _check_file_integrity(expanded, expected_dir):
+        return None
+    try:
+        real = os.path.realpath(os.path.expanduser(file_path))
+        if not os.path.isfile(real):
+            return None
+        if os.path.getsize(real) > _MAX_NATIVE_BYTES:
+            return None
+        with open(real, "rb") as fh:
+            data = tomllib.load(fh)
+    except (OSError, tomllib.TOMLDecodeError if tomllib else OSError, ValueError):
+        return None
+
+    val = data
+    for segment in key_path:
+        if not isinstance(val, dict):
+            return None
+        val = val.get(segment)
+    if isinstance(val, str) and val:
+        return val
+    return None
+
+
+def _read_oauth_token(file_path: str, key_path: list[str],
+                       expected_dir: str) -> SentinelToken | None:
+    """Read an OAuth token and wrap it in SentinelToken for safe handling.
+    Returns None if the file fails integrity checks."""
+    if not _check_file_integrity(file_path, expected_dir):
+        return None
+    try:
+        real = os.path.realpath(os.path.expanduser(file_path))
+        if os.path.getsize(real) > _MAX_NATIVE_BYTES:
+            return None
+        with open(real, "r", encoding="utf-8") as fh:
+            raw = fh.read(_MAX_NATIVE_BYTES + 1)
+        if len(raw) > _MAX_NATIVE_BYTES:
+            return None
+        data = json.loads(raw)
+    except (OSError, json.JSONDecodeError, ValueError):
+        return None
+
+    val = data
+    for segment in key_path:
+        if not isinstance(val, dict):
+            return None
+        val = val.get(segment)
+    if isinstance(val, str) and val:
+        return SentinelToken(val)
+    return None
+
+
+def _read_github_oauth_token() -> SentinelToken | None:
+    """Read a GitHub OAuth token from gh CLI config or Copilot editor config."""
+    # Priority 1: GITHUB_TOKEN env var
+    env_token = os.environ.get("GITHUB_TOKEN", "").strip()
+    if env_token:
+        return SentinelToken(env_token)
+
+    gh_config = os.path.expanduser("~/.config/gh/hosts.yml")
+    if os.path.isfile(gh_config) and _check_file_integrity(gh_config, os.path.expanduser("~/.config/gh")):
+        try:
+            with open(gh_config, "r", encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if line.startswith("oauth_token:"):
+                        _, _, val = line.partition(":")
+                        val = val.strip().strip("\"'")
+                        if val:
+                            return SentinelToken(val)
+        except OSError:
+            pass
+
+    apps_json = os.path.expanduser("~/.config/github-copilot/apps.json")
+    if os.path.isfile(apps_json):
+        token = _read_oauth_token(apps_json, ["github.com", "oauth_token"],
+                                  os.path.expanduser("~/.config/github-copilot"))
+        if token:
+            return token
+
+    return None
+
+
+def _read_cursor_token() -> SentinelToken | None:
+    """Read the Cursor access token from its local SQLite state DB."""
+    db_path = os.path.expanduser("~/.cursor/state.vscdb")
+    if not _check_file_integrity(db_path, os.path.expanduser("~/.cursor")):
+        return None
+    try:
+        real = os.path.realpath(db_path)
+        if os.path.getsize(real) > 10 * 1024 * 1024:  # 10MB cap
+            return None
+        uri = f"file:{real}?mode=ro"
+        conn = sqlite3.connect(uri, uri=True, timeout=5)
+        try:
+            cur = conn.execute(
+                "SELECT value FROM ItemTable WHERE key = ?",
+                ("cursorAuth/cachedToken",),
+            )
+            row = cur.fetchone()
+            if row and isinstance(row[0], str) and row[0]:
+                return SentinelToken(row[0])
+        finally:
+            conn.close()
+    except (OSError, sqlite3.Error):
+        pass
+    return None
+
+
+# --------------------------------------------------------------------------- #
+# Error response scrubbing — strip token patterns before display
+# --------------------------------------------------------------------------- #
+_TOKEN_PATTERN = re.compile(
+    r"(ghp_[A-Za-z0-9]{36,}|gho_[A-Za-z0-9]{36,}|"
+    r"cur_[A-Za-z0-9]{20,}|"
+    r"sk-[A-Za-z0-9\-_]{20,}|sk-ant-[A-Za-z0-9\-_]{20,})"
+)
+
+
+def _scrub_error(text: str) -> str:
+    """Replace token-like patterns with <REDACTED>."""
+    return _TOKEN_PATTERN.sub("<REDACTED>", text)
 
 
 class _SameOriginRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -446,6 +684,8 @@ def _fetch_collector(agent_id):
     path = os.path.expanduser(OMARCHY_USAGE_DIR + "/" + agent_id + ".json")
     if not os.path.isfile(path):
         return {"error": "no-usage-record"}
+    if os.path.getsize(path) > _MAX_NATIVE_BYTES:
+        return {"error": "file-too-large"}
     try:
         with open(path, "r", encoding="utf-8") as fh:
             record = json.load(fh)
@@ -497,18 +737,157 @@ def _fetch_claude():
 
 def _fetch_codex():
     return _fetch_collector("codex")
+
+
+# --------------------------------------------------------------------------- #
+# OAuth-backed providers — Copilot and Cursor (Tier 2, read-use-discard)
+# --------------------------------------------------------------------------- #
+def _fetch_copilot(token: SentinelToken):
+    """Query GitHub's internal Copilot usage endpoint."""
+    real_token = token.value
+    try:
+        request = urllib.request.Request(
+            COPILOT_USER_URL,
+            headers={
+                "Authorization": f"Bearer {real_token}",
+                "Accept": "application/json",
+                "Editor-Version": COPILOT_EDITOR_VERSION,
+                "Copilot-Integration-Id": COPILOT_INTEGRATION_ID,
+                "User-Agent": USER_AGENT,
+            },
+        )
+        with _OPENER.open(request, timeout=TIMEOUT_SECONDS) as response:
+            raw = response.read(MAX_RESPONSE_BYTES + 1)
+            if len(raw) > MAX_RESPONSE_BYTES:
+                return {"error": "response-too-large"}
+        body = json.loads(raw.decode("utf-8", errors="replace"))
+    except urllib.error.HTTPError as exc:
+        return {"error": _scrub_error(f"http-{exc.code}")}
+    except (urllib.error.URLError, TimeoutError, OSError):
+        return {"error": "network-error"}
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+        return {"error": "unexpected-response"}
+    finally:
+        del real_token
+        gc.collect()
+
+    segments = body.get("segments", []) if isinstance(body, dict) else []
+    chat_used = None
+    completion_used = None
+    plan = body.get("plan", "") if isinstance(body, dict) else ""
+
+    for seg in segments:
+        if not isinstance(seg, dict):
+            continue
+        kind = seg.get("kind", "")
+        if kind == "chat":
+            chat_used = seg.get("percent_used")
+        elif kind == "code_completion":
+            completion_used = seg.get("percent_used")
+
+    parts = []
+    if chat_used is not None:
+        parts.append(f"chat {_pct(chat_used)}")
+    if completion_used is not None:
+        parts.append(f"completions {_pct(completion_used)}")
+
+    if not parts:
+        return {"error": "no-usage-data"}
+
+    return {
+        "kind": "percent",
+        "label": parts[0] if len(parts) == 1 else " · ".join(parts),
+        "detail": f"{plan} — {' · '.join(parts)}" if plan else " · ".join(parts),
+        "windows": [],
+    }
+
+
+def _fetch_cursor(token: SentinelToken):
+    """Query Cursor's dashboard API for plan usage."""
+    real_token = token.value
+    try:
+        payload = json.dumps({}).encode("utf-8")
+        request = urllib.request.Request(
+            CURSOR_USAGE_URL,
+            data=payload,
+            headers={
+                "Authorization": f"Bearer {real_token}",
+                "Content-Type": "application/json",
+                "Connect-Protocol-Version": "1",
+                "User-Agent": USER_AGENT,
+            },
+            method="POST",
+        )
+        with _OPENER.open(request, timeout=TIMEOUT_SECONDS) as response:
+            raw = response.read(MAX_RESPONSE_BYTES + 1)
+            if len(raw) > MAX_RESPONSE_BYTES:
+                return {"error": "response-too-large"}
+        body = json.loads(raw.decode("utf-8", errors="replace"))
+    except urllib.error.HTTPError as exc:
+        return {"error": _scrub_error(f"http-{exc.code}")}
+    except (urllib.error.URLError, TimeoutError, OSError):
+        return {"error": "network-error"}
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+        return {"error": "unexpected-response"}
+    finally:
+        del real_token
+        gc.collect()
+
+    if not isinstance(body, dict):
+        return {"error": "unexpected-response"}
+
+    plan_usage = body.get("planUsage", {})
+    if not isinstance(plan_usage, dict):
+        return {"error": "no-usage-data"}
+
+    total_cents = plan_usage.get("totalSpend", 0)
+    limit_cents = plan_usage.get("limit", 0)
+    included_cents = plan_usage.get("includedSpend", 0)
+
+    if limit_cents and limit_cents > 0:
+        total_usd = total_cents / 100.0
+        limit_usd = limit_cents / 100.0
+        pct = round(total_cents / limit_cents * 100.0, 1) if limit_cents else 0
+        remaining = max(0.0, limit_usd - total_usd)
+        return {
+            "kind": "balance",
+            "label": f"${remaining:,.2f} left",
+            "value": round(remaining, 2),
+            "used": round(total_usd, 2),
+            "total": round(limit_usd, 2),
+            "ratio": round(pct / 100.0, 4),
+            "detail": f"${total_usd:,.2f} of ${limit_usd:,.2f} used ({pct:.0f}%)",
+        }
+
+    if included_cents and included_cents > 0:
+        total_usd = total_cents / 100.0
+        included_usd = included_cents / 100.0
+        return {
+            "kind": "balance",
+            "label": f"${total_usd:,.2f} used",
+            "value": round(total_usd, 2),
+            "total": round(included_usd, 2),
+            "detail": f"${total_usd:,.2f} of ${included_usd:,.2f} included",
+        }
+
+    return {"error": "no-usage-data"}
+
+
 PROVIDER_SPECS = [
     {"id": "opencode", "name": "OpenCode Go", "display": "OC", "logo": "opencode", "key_envs": ["OPENCODE_GO_API_KEY", "OPENCODE_ZEN_API_KEY"], "fetch": _fetch_opencode},
     {"id": "openrouter", "name": "OpenRouter", "display": "OR", "logo": "openrouter", "key_envs": ["OPENROUTER_API_KEY"], "fetch": _fetch_openrouter},
     {"id": "claude", "name": "Claude Code", "display": "CL", "logo": "claude", "local": True, "fetch": _fetch_claude},
     {"id": "codex", "name": "Codex", "display": "CX", "logo": "openai", "local": True, "fetch": _fetch_codex},
-    {"id": "deepseek", "name": "DeepSeek", "display": "DS", "logo": "deepseek", "key_envs": ["DEEPSEEK_API_KEY"], "fetch": _fetch_deepseek},
-    {"id": "kimi", "name": "Kimi", "display": "KI", "logo": "kimi", "key_envs": ["KIMI_API_KEY", "MOONSHOT_API_KEY"], "fetch": _fetch_kimi},
+    {"id": "deepseek", "name": "DeepSeek", "display": "DS", "logo": "deepseek", "key_envs": ["DEEPSEEK_API_KEY"], "native_toml": {"file": "~/.deepseek/config.toml", "path": ["api_key"]}, "fetch": _fetch_deepseek},
+    {"id": "kimi", "name": "Kimi", "display": "KI", "logo": "kimi", "key_envs": ["KIMI_API_KEY", "MOONSHOT_API_KEY"], "native_toml": {"file": "~/.kimi-code/config.toml", "path": ["providers", "kimi", "api_key"]}, "fetch": _fetch_kimi},
     {"id": "novita", "name": "NovitaAI", "display": "NV", "logo": "novita", "key_envs": ["NOVITA_API_KEY"], "fetch": _fetch_novita},
     {"id": "zai", "name": "ZAI", "display": "Z", "logo": "zai", "key_envs": ["ZAI_API_KEY", "GLM_API_KEY"], "fetch": _fetch_zai},
     {"id": "alibaba", "name": "Alibaba", "display": "AB", "logo": "alibabacloud", "key_envs": ["DASHSCOPE_API_KEY"], "fetch": _fetch_alibaba},
     {"id": "arcee", "name": "Arcee AI", "display": "AR", "logo": "arcee", "key_envs": ["ARCEE_API_KEY"], "fetch": _fetch_arcee},
     {"id": "commandcode", "name": "Command Code", "display": "CC", "logo": "commandcode", "key_envs": ["COMMANDCODE_API_KEY"], "fetch": _fetch_commandcode},
+    # Tier 2 — OAuth-backed providers (read-use-discard, opt-in)
+    {"id": "copilot", "name": "GitHub Copilot", "display": "CP", "logo": "openai", "oauth": True, "token_reader": _read_github_oauth_token, "fetch": _fetch_copilot},
+    {"id": "cursor", "name": "Cursor", "display": "CU", "logo": "opencode", "oauth": True, "token_reader": _read_cursor_token, "fetch": _fetch_cursor},
 ]
 
 
@@ -587,7 +966,32 @@ def main() -> None:
             else:
                 rec.update(data)
             return rec
+
+        # Tier 2 — OAuth-backed providers: read-use-discard, never cached
+        if spec.get("oauth"):
+            token = spec["token_reader"]()
+            if not token:
+                rec["configured"] = False
+                rec["error"] = "no-token"
+                return rec
+            try:
+                rec.update(spec["fetch"](token))
+            except Exception as exc:  # noqa: BLE001
+                rec["error"] = _scrub_error(_transport_error(exc))
+            finally:
+                token = None  # noqa: F841 — read-use-discard
+                gc.collect()
+            rec["configured"] = "error" not in rec
+            return rec
+
+        # Tier 1 — Scoped API keys: env var → native config file fallback
         key = next((_read_key(e) for e in spec["key_envs"] if _read_key(e)), None)
+
+        # Native TOML fallback (DeepSeek, Kimi)
+        if not key and spec.get("native_toml"):
+            ntl = spec["native_toml"]
+            key = _read_toml_key(ntl["file"], ntl["path"])
+
         rec["configured"] = key is not None
         if not key:
             rec["error"] = "no-key"
