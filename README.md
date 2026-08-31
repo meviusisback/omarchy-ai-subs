@@ -34,6 +34,7 @@ OC · 5h 0% (4h) · W 79% (2d) · M 46% (16d)     (Data mode bar chip)
 | `OR` | OpenRouter | USD credits remaining | `OPENROUTER_API_KEY` |
 | `CL` | Claude Code | % used per limit window + resets | none — reads Omarchy agent usage records |
 | `CX` | Codex | % used per limit window + resets | none — reads Omarchy agent usage records |
+| `CC` | Command Code | % used (5h / week) + USD balance remaining | `COMMANDCODE_API_KEY` |
 | `DS` | DeepSeek | USD balance | `DEEPSEEK_API_KEY` |
 | `KI` | Kimi / Moonshot | USD balance | `KIMI_API_KEY` |
 | `NV` | NovitaAI | USD balance | `NOVITA_API_KEY` |

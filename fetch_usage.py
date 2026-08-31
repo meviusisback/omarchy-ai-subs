@@ -9,6 +9,9 @@ renders. Stdlib-only (urllib) so it runs under the system python3 with no deps.
 Provider mapping (display -> vendor -> metric):
   OC OpenCode Go      % used (rolling 5h / weekly / monthly)
   OR OpenRouter       USD credits remaining
+  CC Command Code     % used (rolling 5h / weekly) + USD balance remaining
+  CL Claude Code      collector-backed
+  CX Codex            collector-backed
   DS DeepSeek         USD balance
   KI Kimi/Moonshot    CNY balance
   NV NovitaAI         USD balance
@@ -21,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import ssl
@@ -40,6 +44,7 @@ NOVITA_BALANCE_URL = "https://api.novita.ai/openapi/v1/billing/balance/detail"
 ZAI_BALANCE_URL = "https://open.bigmodel.cn/api/paas/v4/user/balance"
 ALIBABA_BILLING_URL = "https://dashscope.aliyuncs.com/api/v1/quotas"
 ARCEE_BALANCE_URL = "https://api.arcee.ai/v2/user/balance"
+COMMANDCODE_CREDITS_URL = "https://api.commandcode.ai/alpha/billing/credits"
 
 TIMEOUT_SECONDS = 15
 MAX_RESPONSE_BYTES = 4096
@@ -113,7 +118,7 @@ def _normalize_usage(body):
             normalized[window_id] = None
             continue
         try:
-            percent = round(float(raw["percent"]), 1) if raw.get("percent") is not None else None
+            percent = round(_finite(raw["percent"]), 1) if raw.get("percent") is not None else None
         except (TypeError, ValueError):
             percent = None
         normalized[window_id] = {
@@ -135,6 +140,17 @@ def _safe_float(value, default: float = 0.0) -> float:
         return default
 
 
+def _finite(value, default: float = 0.0) -> float:
+    """Like _safe_float, but rejects NaN/inf.
+
+    json.dumps() emits bare NaN/Infinity for non-finite floats, which is not
+    valid JSON — QML's JSON.parse would throw on the whole document and every
+    provider block would go blank. Keep those values out of the output.
+    """
+    number = _safe_float(value, default)
+    return number if math.isfinite(number) else default
+
+
 _CURRENCY_RE = re.compile(r"^[A-Za-z]{3,5}$")
 
 
@@ -150,7 +166,7 @@ def _extract_balance(body, field_names, *, unwrap_data: bool = False):
     inner = body.get("data") if unwrap_data and isinstance(body.get("data"), dict) else body
     for key in field_names:
         if key in inner:
-            return _safe_float(inner[key])
+            return _finite(inner[key])
     return None
 
 
@@ -193,8 +209,8 @@ def _fetch_openrouter(api_key: str):
     data = body.get("data") if isinstance(body, dict) else None
     if not isinstance(data, dict) or data.get("total_credits") is None or data.get("total_usage") is None:
         return {"error": "unexpected-response"}
-    total = _safe_float(data["total_credits"])
-    used = _safe_float(data["total_usage"])
+    total = _finite(data["total_credits"])
+    used = _finite(data["total_usage"])
     remaining = max(0.0, total - used)
     pct_used = (used / total * 100.0) if total > 0 else 0.0
     return {
@@ -218,7 +234,7 @@ def _fetch_deepseek(api_key: str):
         if not isinstance(info, dict):
             continue
         currency = _safe_currency(info.get("currency"), currency)
-        total += _safe_float(info.get("total_balance"))
+        total += _finite(info.get("total_balance"))
     value = round(total, 2)
     return {
         "kind": "balance",
@@ -236,9 +252,9 @@ def _fetch_kimi(api_key: str):
     data = body.get("data")
     if not isinstance(data, dict) or "available_balance" not in data:
         return {"error": "unexpected-response"}
-    available = _safe_float(data.get("available_balance"))
-    voucher = _safe_float(data.get("voucher_balance"))
-    cash = _safe_float(data.get("cash_balance"))
+    available = _finite(data.get("available_balance"))
+    voucher = _finite(data.get("voucher_balance"))
+    cash = _finite(data.get("cash_balance"))
     return {
         "kind": "balance",
         "label": f"${available:,.2f}",
@@ -256,7 +272,7 @@ def _fetch_novita(api_key: str):
     raw = body.get("availableBalance") or body.get("cashBalance")
     if raw is None:
         return {"error": "unexpected-response"}
-    balance = _safe_float(raw) / 10000.0
+    balance = _finite(raw) / 10000.0
     return {
         "kind": "balance",
         "label": f"${balance:,.2f}",
@@ -298,7 +314,7 @@ def _fetch_alibaba(api_key: str):
         raw = data.get("credits")
     if raw is None:
         return {"error": "unexpected-response"}
-    balance = _safe_float(raw)
+    balance = _finite(raw)
     return {
         "kind": "balance",
         "label": f"${balance:,.2f}",
@@ -322,6 +338,80 @@ def _fetch_arcee(api_key: str):
         "currency": "USD",
         "detail": f"balance ${balance:,.2f}",
     }
+
+
+def _fetch_commandcode(api_key: str):
+    body = _request_json(COMMANDCODE_CREDITS_URL, api_key)
+    if not isinstance(body, dict):
+        return {"error": "unexpected-response"}
+    credits = body.get("credits") if isinstance(body.get("credits"), dict) else None
+    window_limits = body.get("windowLimits") if isinstance(body.get("windowLimits"), dict) else None
+    if credits is None and window_limits is None:
+        return {"error": "unexpected-response"}
+
+    # Monthly remaining credits (USD)
+    monthly_credits = _finite(credits.get("monthlyCredits")) if credits else None
+    purchased = _finite(credits.get("purchasedCredits")) if credits else 0.0
+    free = _finite(credits.get("freeCredits")) if credits else 0.0
+    # _finite on the sum too: two large-but-finite components can still add
+    # up to inf, which would serialize as bare Infinity.
+    total_remaining = max(0.0, _finite((monthly_credits or 0.0) + purchased + free))
+
+    # Rolling windows: fiveHour and weekly — each has used/cap/resetAt (epoch ms)
+    windows = []
+    window_map = {"fiveHour": "5h", "weekly": "W"}
+    for raw_key, label in window_map.items():
+        wl = window_limits.get(raw_key) if isinstance(window_limits, dict) else None
+        if not isinstance(wl, dict):
+            continue
+        cap = _finite(wl.get("cap"))
+        used = _finite(wl.get("used"))
+        if cap <= 0:
+            continue
+        pct = round(min(100.0, max(0.0, used / cap * 100.0)), 1)
+        # resetAt is epoch ms — convert to ISO string for the QML countdown
+        reset_ms = wl.get("resetAt")
+        reset_iso = None
+        if isinstance(reset_ms, (int, float)) and reset_ms > 0:
+            try:
+                reset_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(reset_ms / 1000.0))
+            except (ValueError, OverflowError, OSError):
+                # Out-of-range timestamp: lose the countdown, keep the window.
+                reset_iso = None
+        windows.append({
+            "id": raw_key.lower(),
+            "label": label,
+            "percent": pct,
+            "resetsAt": reset_iso,
+        })
+
+    # Rolling windows render as percent kind (like OpenCode).
+    # Show the monthly balance in the detail line.
+    if windows:
+        headline_pct = windows[0].get("percent") if windows else None
+        detail_parts = [f"{w['label']} {_pct(w['percent'])}" for w in windows]
+        if total_remaining > 0:
+            detail_parts.append(f"${total_remaining:,.2f} remaining")
+        return {
+            "kind": "percent",
+            "label": _pct(headline_pct),
+            "value": headline_pct,
+            "detail": " · ".join(detail_parts),
+            "windows": windows,
+            "monthlyCredits": round(total_remaining, 2) if total_remaining > 0 else None,
+        }
+
+    # Fallback: no rolling windows, just show balance
+    if total_remaining > 0:
+        return {
+            "kind": "balance",
+            "label": f"${total_remaining:,.2f}",
+            "value": round(total_remaining, 2),
+            "currency": "USD",
+            "detail": f"balance ${total_remaining:,.2f}",
+        }
+
+    return {"error": "no-usage-data"}
 
 
 OMARCHY_USAGE_DIR = "~/.local/state/omarchy/agents/usage"
@@ -367,7 +457,7 @@ def _fetch_collector(agent_id):
         if not isinstance(entry, dict) or entry.get("percent") is None:
             continue
         try:
-            percent = round(float(entry["percent"]), 1)
+            percent = round(_finite(entry["percent"]), 1)
         except (TypeError, ValueError):
             continue
         short = _short_window_label(entry.get("title") or entry.get("label"))
@@ -380,9 +470,9 @@ def _fetch_collector(agent_id):
         })
     balance = record.get("balance") if isinstance(record, dict) else None
     out = {"kind": "percent" if windows else "note", "windows": windows}
-    if isinstance(balance, dict) and _safe_float(balance.get("funded")) > 0:
-        funded = _safe_float(balance.get("funded"))
-        remaining = max(0.0, _safe_float(balance.get("remaining")))
+    if isinstance(balance, dict) and _finite(balance.get("funded")) > 0:
+        funded = _finite(balance.get("funded"))
+        remaining = max(0.0, _finite(balance.get("remaining")))
         currency = _safe_currency(balance.get("currency"))
         symbol = "$" if currency == "USD" else currency + " "
         used = max(0.0, funded - remaining)
@@ -418,6 +508,7 @@ PROVIDER_SPECS = [
     {"id": "zai", "name": "ZAI", "display": "Z", "logo": "zai", "key_envs": ["ZAI_API_KEY", "GLM_API_KEY"], "fetch": _fetch_zai},
     {"id": "alibaba", "name": "Alibaba", "display": "AB", "logo": "alibabacloud", "key_envs": ["DASHSCOPE_API_KEY"], "fetch": _fetch_alibaba},
     {"id": "arcee", "name": "Arcee AI", "display": "AR", "logo": "arcee", "key_envs": ["ARCEE_API_KEY"], "fetch": _fetch_arcee},
+    {"id": "commandcode", "name": "Command Code", "display": "CC", "logo": "commandcode", "key_envs": ["COMMANDCODE_API_KEY"], "fetch": _fetch_commandcode},
 ]
 
 
