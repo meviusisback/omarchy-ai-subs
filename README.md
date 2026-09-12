@@ -7,7 +7,7 @@ credit balances and live reset countdowns, for every provider you have
 configured (API keys in `~/.hermes/.env`, native config files, or OAuth tokens).
 
 ```text
-OC · 5h 0% (4h) · W 79% (2d) · M 46% (16d)     (Data mode bar chip)
+OC · 5h 0% [──] (4h) · W 79% [━━──] (2d) · M 46% [━───] (16d)     (Data mode bar chip)
 ```
 
 ## Features
@@ -34,7 +34,7 @@ OC · 5h 0% (4h) · W 79% (2d) · M 46% (16d)     (Data mode bar chip)
 | `OR` | OpenRouter | USD credits remaining | `OPENROUTER_API_KEY` |
 | `CL` | Claude Code | % used per limit window + resets | none — reads Omarchy agent usage records |
 | `CX` | Codex | % used per limit window + resets | none — reads Omarchy agent usage records |
-| `CC` | Command Code | % used (5h / week) + USD balance remaining | `COMMANDCODE_API_KEY` |
+| `CC` | Command Code | % used (5h / week / month) + USD balance remaining | `COMMANDCODE_API_KEY` |
 | `DS` | DeepSeek | USD balance | `DEEPSEEK_API_KEY` (or `~/.deepseek/config.toml`) |
 | `KI` | Kimi / Moonshot | USD balance | `KIMI_API_KEY` (or `~/.kimi-code/config.toml`) |
 | `NV` | NovitaAI | USD balance | `NOVITA_API_KEY` |

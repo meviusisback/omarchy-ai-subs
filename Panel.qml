@@ -221,6 +221,7 @@ Panel {
     visible: root.barShowsData
 
     readonly property var sub: root.defaultSub
+    readonly property bool hasWindows: !!sub && (sub.windows || []).length > 0
     readonly property string chipText: root.compactSubText(sub)
     readonly property bool failed: root.errorText !== "" && root.errorText.indexOf("fetch-failed") === 0
     readonly property color chipColor: failed ? root.urgent : root.foreground
@@ -234,8 +235,10 @@ Panel {
       else root.toggle()
     }
 
-    implicitWidth: (chipLogo.visible ? chipLogo.width + Style.space(6) : 0) + chipLabel.implicitWidth + Style.space(17)
-    implicitHeight: Math.max(chipLogo.height, chipLabel.implicitHeight)
+    implicitWidth: (chipLogo.visible ? chipLogo.width + Style.space(6) : 0)
+      + (dataButton.hasWindows ? chipWindowsRow.implicitWidth : chipLabel.implicitWidth)
+      + Style.space(17)
+    implicitHeight: Math.max(chipLogo.height, dataButton.hasWindows ? chipWindowsRow.implicitHeight : chipLabel.implicitHeight)
 
     Image {
       id: chipLogo
@@ -251,11 +254,107 @@ Panel {
       mipmap: true
     }
 
+    // Graphical progress bar view for windowed subscriptions (OpenCode, Command Code, etc.)
+    Row {
+      id: chipWindowsRow
+      anchors.left: chipLogo.visible ? chipLogo.right : parent.left
+      anchors.leftMargin: chipLogo.visible ? Style.space(6) : 0
+      anchors.verticalCenter: parent.verticalCenter
+      visible: dataButton.hasWindows
+      spacing: Style.space(6)
+
+      Repeater {
+        model: dataButton.hasWindows ? dataButton.sub.windows : []
+
+        Row {
+          id: winItem
+          required property var modelData
+          required property int index
+          anchors.verticalCenter: parent.verticalCenter
+          spacing: Style.space(4)
+
+          // Dot separator before subsequent windows
+          Text {
+            visible: winItem.index > 0
+            anchors.verticalCenter: parent.verticalCenter
+            text: "·"
+            textFormat: Text.PlainText
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+
+          // Window label (5h, W, M)
+          Text {
+            anchors.verticalCenter: parent.verticalCenter
+            text: winItem.modelData ? winItem.modelData.label : "?"
+            textFormat: Text.PlainText
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+
+          // Percentage text
+          Text {
+            anchors.verticalCenter: parent.verticalCenter
+            text: winItem.modelData && winItem.modelData.percent !== null && winItem.modelData.percent !== undefined
+              ? Math.round(winItem.modelData.percent) + "%" : "—"
+            textFormat: Text.PlainText
+            color: dataButton.chipColor
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+
+          // Real graphical mini progress bar beside the %
+          Item {
+            anchors.verticalCenter: parent.verticalCenter
+            width: Style.space(22)
+            height: Style.space(4)
+            visible: winItem.modelData && winItem.modelData.percent !== null && winItem.modelData.percent !== undefined
+
+            readonly property real pct: parent.visible ? Number(winItem.modelData.percent) : 0
+            readonly property real ratio: root.clamp(pct / 100.0, 0, 1)
+
+            Rectangle {
+              anchors.fill: parent
+              radius: height / 2
+              color: root.track
+            }
+
+            Rectangle {
+              anchors.left: parent.left
+              anchors.verticalCenter: parent.verticalCenter
+              height: parent.height
+              width: Math.round(parent.width * parent.ratio)
+              radius: height / 2
+              color: root.usageTone(parent.ratio)
+            }
+          }
+
+          // Reset countdown hint: (13h)
+          Text {
+            readonly property real _tick: root.nowMs
+            readonly property int remainingMs: _tick > 0 ? root.resetRemainingMs(winItem.modelData ? winItem.modelData.resetsAt : null) : -1
+            readonly property string resetStr: root.formatResetShort(remainingMs)
+            visible: resetStr !== ""
+            anchors.verticalCenter: parent.verticalCenter
+            text: "(" + resetStr + ")"
+            textFormat: Text.PlainText
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+        }
+      }
+    }
+
+    // Fallback single-label view for balance-only subs or errors
     Text {
       id: chipLabel
       anchors.left: chipLogo.visible ? chipLogo.right : parent.left
       anchors.leftMargin: chipLogo.visible ? Style.space(6) : 0
       anchors.verticalCenter: parent.verticalCenter
+      visible: !dataButton.hasWindows
       text: dataButton.chipText
       textFormat: Text.PlainText
       color: dataButton.chipColor

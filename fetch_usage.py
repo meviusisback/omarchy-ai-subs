@@ -9,7 +9,7 @@ renders. Stdlib-only (urllib) so it runs under the system python3 with no deps.
 Provider mapping (display -> vendor -> metric):
   OC OpenCode Go      % used (rolling 5h / weekly / monthly)
   OR OpenRouter       USD credits remaining
-  CC Command Code     % used (rolling 5h / weekly) + USD balance remaining
+  CC Command Code     % used (rolling 5h / weekly / monthly) + USD balance remaining
   CL Claude Code      collector-backed
   CX Codex            collector-backed
   DS DeepSeek         USD balance (env var or native config fallback)
@@ -25,6 +25,7 @@ Provider mapping (display -> vendor -> metric):
 from __future__ import annotations
 
 import argparse
+import datetime
 import gc
 import json
 import math
@@ -56,6 +57,7 @@ ZAI_BALANCE_URL = "https://open.bigmodel.cn/api/paas/v4/user/balance"
 ALIBABA_BILLING_URL = "https://dashscope.aliyuncs.com/api/v1/quotas"
 ARCEE_BALANCE_URL = "https://api.arcee.ai/v2/user/balance"
 COMMANDCODE_CREDITS_URL = "https://api.commandcode.ai/alpha/billing/credits"
+COMMANDCODE_SUBSCRIPTIONS_URL = "https://api.commandcode.ai/alpha/billing/subscriptions"
 COPILOT_USER_URL = "https://api.github.com/copilot_internal/user"
 CURSOR_USAGE_URL = "https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage"
 
@@ -70,6 +72,19 @@ WINDOWS = [
     {"id": "weekly", "label": "W"},
     {"id": "monthly", "label": "M"},
 ]
+COMMANDCODE_PLAN_ALLOWANCES = {
+    "individual-go": 10.0,
+    "individual-pro": 30.0,
+    "individual-goat": 70.0,
+    "individual-pro-v1": 80.0,
+    "individual-max": 150.0,
+    "individual-ultra": 300.0,
+    "go": 10.0,
+    "pro": 30.0,
+    "goat": 70.0,
+    "max": 150.0,
+    "ultra": 300.0,
+}
 
 
 def _read_key(env_name: str) -> str | None:
@@ -408,6 +423,26 @@ def _extract_balance(body, field_names, *, unwrap_data: bool = False):
     return None
 
 
+def _normalize_iso_timestamp(ts) -> str | None:
+    """Convert an epoch millisecond timestamp (int/float) or ISO string into
+    a UTC ISO 8601 string (%Y-%m-%dT%H:%M:%SZ) for QML countdown compatibility."""
+    if not ts:
+        return None
+    if isinstance(ts, (int, float)) and ts > 0:
+        try:
+            return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts / 1000.0))
+        except (ValueError, OverflowError, OSError):
+            return None
+    if isinstance(ts, str):
+        try:
+            clean = ts.replace("Z", "+00:00")
+            dt = datetime.datetime.fromisoformat(clean)
+            return dt.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        except (ValueError, OverflowError, OSError):
+            return None
+    return None
+
+
 # --------------------------------------------------------------------------- #
 # Provider fetchers
 # --------------------------------------------------------------------------- #
@@ -595,9 +630,9 @@ def _fetch_commandcode(api_key: str):
     # up to inf, which would serialize as bare Infinity.
     total_remaining = max(0.0, _finite((monthly_credits or 0.0) + purchased + free))
 
-    # Rolling windows: fiveHour and weekly — each has used/cap/resetAt (epoch ms)
+    # Rolling windows: fiveHour, weekly, and optional monthly from windowLimits
     windows = []
-    window_map = {"fiveHour": "5h", "weekly": "W"}
+    window_map = {"fiveHour": "5h", "weekly": "W", "monthly": "M"}
     for raw_key, label in window_map.items():
         wl = window_limits.get(raw_key) if isinstance(window_limits, dict) else None
         if not isinstance(wl, dict):
@@ -607,15 +642,7 @@ def _fetch_commandcode(api_key: str):
         if cap <= 0:
             continue
         pct = round(min(100.0, max(0.0, used / cap * 100.0)), 1)
-        # resetAt is epoch ms — convert to ISO string for the QML countdown
-        reset_ms = wl.get("resetAt")
-        reset_iso = None
-        if isinstance(reset_ms, (int, float)) and reset_ms > 0:
-            try:
-                reset_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(reset_ms / 1000.0))
-            except (ValueError, OverflowError, OSError):
-                # Out-of-range timestamp: lose the countdown, keep the window.
-                reset_iso = None
+        reset_iso = _normalize_iso_timestamp(wl.get("resetAt"))
         windows.append({
             "id": raw_key.lower(),
             "label": label,
@@ -623,10 +650,35 @@ def _fetch_commandcode(api_key: str):
             "resetsAt": reset_iso,
         })
 
+    # If windowLimits did not supply a monthly window, enrich it from the
+    # subscription plan allowance and billing cycle end date.
+    has_monthly = any(w.get("id") == "monthly" or w.get("label") == "M" for w in windows)
+    if not has_monthly and monthly_credits is not None:
+        try:
+            sub_body = _request_json(COMMANDCODE_SUBSCRIPTIONS_URL, api_key)
+            sub_data = sub_body.get("data") if isinstance(sub_body, dict) else None
+            if isinstance(sub_data, dict):
+                status = str(sub_data.get("status", "")).lower()
+                plan_id = str(sub_data.get("planId", "")).lower()
+                cap = COMMANDCODE_PLAN_ALLOWANCES.get(plan_id)
+                if cap and cap > 0 and status in ("active", "trialing"):
+                    used = max(0.0, cap - monthly_credits)
+                    pct = round(min(100.0, max(0.0, used / cap * 100.0)), 1)
+                    reset_iso = _normalize_iso_timestamp(sub_data.get("currentPeriodEnd"))
+                    windows.append({
+                        "id": "monthly",
+                        "label": "M",
+                        "percent": pct,
+                        "resetsAt": reset_iso,
+                    })
+        except Exception:
+            # Subscription enrichment is best-effort; keep existing windows on error.
+            pass
+
     # Rolling windows render as percent kind (like OpenCode).
     # Show the monthly balance in the detail line.
     if windows:
-        headline_pct = windows[0].get("percent") if windows else None
+        headline_pct = next((w["percent"] for w in windows if w.get("percent") is not None), None)
         detail_parts = [f"{w['label']} {_pct(w['percent'])}" for w in windows]
         if total_remaining > 0:
             detail_parts.append(f"${total_remaining:,.2f} remaining")
