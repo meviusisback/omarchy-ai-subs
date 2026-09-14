@@ -141,14 +141,16 @@ class CredentialFileError(Exception):
 def _home_dir() -> str | None:
     """The real home directory: ``$HOME`` when it is absolute and exists, else
     the passwd entry.  ``os.path.expanduser("~")`` yields ``/`` for an empty
-    ``HOME``, which would silently relocate every credential path."""
+    ``HOME``, which would silently relocate every credential path, and a home of
+    ``/`` would make every absolute path look like it is "inside the home"."""
     home = os.environ.get("HOME", "")
-    if home and os.path.isabs(home) and os.path.isdir(home):
+    if home and home != os.sep and os.path.isabs(home) and os.path.isdir(home):
         return home
     try:
         import pwd
 
-        return pwd.getpwuid(os.getuid()).pw_dir or None
+        candidate = pwd.getpwuid(os.getuid()).pw_dir or None
+        return candidate if candidate and candidate != os.sep else None
     except (ImportError, KeyError, OSError):
         return None
 
@@ -288,13 +290,13 @@ def read_confined_text(path: str, roots, max_bytes: int = MAX_CREDENTIAL_BYTES,
     """Read a validated credential file through a verified descriptor.
 
     ``confined_path`` validates the path; the file is then opened with
-    ``O_NOFOLLOW`` and re-validated on the descriptor itself (``fstat`` plus an
-    identity match against the validated path, and — where procfs resolves — a
-    containment check on the descriptor's real path), so a path swapped between
-    the two steps is detected rather than read.  ``O_NONBLOCK`` keeps a FIFO
-    planted at the path from wedging the refresh tick.  Raises
-    ``CredentialFileError``.  Residual: without a readable ``/proc`` the
-    containment half of the re-check cannot run (identity still does)."""
+    ``O_NOFOLLOW`` and re-validated on the descriptor itself — ``fstat``
+    attributes, an identity match (``samestat``) against the validated path, and
+    a containment check on the descriptor's real path via ``/proc/self/fd``.
+    A path swapped between the two steps is therefore detected unless the swap
+    is invisible to a re-stat of the same path *and* procfs is unavailable, in
+    which case the read fails closed.  ``O_NONBLOCK`` keeps a FIFO planted at
+    the path from wedging the refresh tick.  Raises ``CredentialFileError``."""
     real = confined_path(path, roots, max_bytes, uid, ancestor_uids, trust_root)
     uid = os.getuid() if uid is None else uid
     flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK
@@ -308,7 +310,9 @@ def read_confined_text(path: str, roots, max_bytes: int = MAX_CREDENTIAL_BYTES,
     try:
         st = os.fstat(fd)
         # The descriptor must be the very file that was validated: a path swapped
-        # between the validation and this open cannot redirect the read.
+        # between the validation and this open cannot redirect the read.  (This
+        # catches a swap that is visible at re-stat time; a swap that persists
+        # identically for both stats is caught by the containment check below.)
         try:
             same_file = os.path.samestat(st, os.stat(real))
         except OSError:
@@ -325,13 +329,15 @@ def read_confined_text(path: str, roots, max_bytes: int = MAX_CREDENTIAL_BYTES,
             raise CredentialFileError("group/other permission bits set")
         if st.st_size > max_bytes:
             raise CredentialFileError("file too large")
-        # Where procfs is readable the descriptor must also resolve inside the
-        # trusted tree (catches a swapped directory or a mount boundary).  An
-        # unreadable /proc is not a refusal — the identity check above holds.
+        # The descriptor must also resolve inside the trusted tree: this is what
+        # catches a swapped directory or a mount boundary, since re-statting the
+        # PATH cannot see either.  It needs procfs, so an unresolvable
+        # /proc/self/fd fails closed rather than silently dropping the check.
         fd_real = os.path.realpath(_PROC_FD_PREFIX + str(fd))
-        if not fd_real.startswith(_PROC_FD_PREFIX):
-            if _containing_root(fd_real, roots, uid, ancestor_uids, trust_root) is None:
-                raise CredentialFileError("descriptor escaped the trusted directory")
+        if fd_real.startswith(_PROC_FD_PREFIX):
+            raise CredentialFileError("cannot verify the descriptor's location")
+        if _containing_root(fd_real, roots, uid, ancestor_uids, trust_root) is None:
+            raise CredentialFileError("descriptor escaped the trusted directory")
         remaining = max_bytes + 1
         while remaining > 0:
             chunk = os.read(fd, min(65536, remaining))
@@ -478,7 +484,7 @@ def _read_cursor_token() -> SentinelToken | None:
                              max_bytes=10 * 1024 * 1024)
         if any(ch in real for ch in "?#"):  # would break the SQLite URI below
             return None
-        flags = os.O_RDONLY | os.O_CLOEXEC
+        flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
         fd = os.open(real, flags)
@@ -491,12 +497,14 @@ def _read_cursor_token() -> SentinelToken | None:
             return None
         if not os.path.samestat(st, os.stat(real)):
             return None
-        # SQLite re-opens the path it is given, so hand it the descriptor that
-        # was just validated: /proc/self/fd/<fd> resolves to this same file and
-        # cannot be swapped between validation and the open.
+        # SQLite re-opens whatever name it is given (it resolves /proc/self/fd
+        # back to the real name), so the fd pins the inode but does not by
+        # itself remove the re-open; the descriptor is kept open and its
+        # verification is done here, before SQLite touches the file.
         fd_ref = _PROC_FD_PREFIX + str(fd)
-        source = fd_ref if os.path.exists(fd_ref) else real
-        conn = sqlite3.connect(f"file:{source}?mode=ro", uri=True, timeout=5)
+        if not os.path.exists(fd_ref):
+            return None  # fail closed rather than hand SQLite a bare path
+        conn = sqlite3.connect(f"file:{fd_ref}?mode=ro", uri=True, timeout=5)
         try:
             cur = conn.execute(
                 "SELECT value FROM ItemTable WHERE key = ?",
@@ -1170,7 +1178,8 @@ def _transport_error(exc):
 
 
 # Environment variables a credential file must never set: they choose which code
-# runs (or where paths resolve), not which key is used.
+# runs, where paths resolve, which TLS trust store or proxy is used, not which
+# key is used.  See load_hermes_dotenv.
 _ENV_DENYLIST = frozenset({
     "PATH", "HOME", "IFS", "ENV", "BASH_ENV", "SHELLOPTS",
     "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT",
@@ -1178,6 +1187,9 @@ _ENV_DENYLIST = frozenset({
     "XDG_CONFIG_HOME", "XDG_RUNTIME_DIR", "HERMES_HOME", "TMPDIR",
     "SSL_CERT_FILE", "SSL_CERT_DIR", "SSLKEYLOGFILE",
     "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
+    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+    "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+    "GCONV_PATH", "LOCPATH",
     "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM",
 })
 _ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")

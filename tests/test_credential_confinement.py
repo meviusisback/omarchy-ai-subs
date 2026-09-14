@@ -133,6 +133,25 @@ class TestDotenvAcceptance(ConfinementTestCase):
         self.assertNotIn("LD_PRELOAD", os.environ)
         self.assertNotEqual(os.environ.get("HOME"), "/tmp/evil")
 
+    def test_denylist_covers_process_and_transport_control_variables(self):
+        names = ["PATH", "HOME", "IFS", "LD_PRELOAD", "LD_LIBRARY_PATH",
+                 "PYTHONPATH", "PYTHONHOME", "TMPDIR", "HERMES_HOME",
+                 "SSL_CERT_FILE", "SSL_CERT_DIR", "SSLKEYLOGFILE",
+                 "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
+                 "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+                 "http_proxy", "https_proxy", "GCONV_PATH", "LOCPATH",
+                 "GIT_CONFIG_GLOBAL"]
+        before = {name: os.environ.get(name) for name in names}
+        path = self.write_file(
+            ".env",
+            "".join(f"{name}=/tmp/evil\n" for name in names)
+            + "OPENROUTER_API_KEY=keep-me\n")
+        self.assertTrue(self.load(path))
+        for name in names:
+            with self.subTest(name=name):
+                self.assertEqual(os.environ.get(name), before[name])
+        self.assertEqual(os.environ.get("OPENROUTER_API_KEY"), "keep-me")
+
     def test_ignores_malformed_variable_names(self):
         path = self.write_file(".env", "BAD NAME=x\n1LEADING=x\nOPENROUTER_API_KEY=ok\n")
         self.assertTrue(self.load(path))
@@ -310,6 +329,11 @@ class TestEnvRoots(ConfinementTestCase):
         self.assertTrue(fallback is None or fallback.startswith(os.sep))
         self.assertNotEqual(fallback, "/")
 
+    def test_home_dir_rejects_a_root_home(self):
+        # HOME=/ would make _is_within(x, home) true for every absolute path.
+        os.environ["HOME"] = os.sep
+        self.assertNotEqual(fetch_usage._home_dir(), os.sep)
+
     def test_expand_home_with_empty_home_never_yields_root_path(self):
         os.environ["HOME"] = ""
         expanded = fetch_usage._expand_home("~/.hermes/.env")
@@ -352,6 +376,27 @@ class TestPathEdgeCases(ConfinementTestCase):
         os.symlink(target, link)
         self.assert_refused(link)
         self.assert_refused(link + "/")
+
+    def test_refuses_relative_path_even_from_inside_the_root(self):
+        # Without the isabs guard a relative --env resolves against the process
+        # cwd, which can be inside the root — the resolution must never happen.
+        self.write_file(".env", "OPENROUTER_API_KEY=leak\n")
+        os.environ.pop("OPENROUTER_API_KEY", None)
+        cwd = os.getcwd()
+        os.chdir(self.root)
+        try:
+            self.assertFalse(self.load(".env"))
+            self.assertFalse(self.load("./.env"))
+        finally:
+            os.chdir(cwd)
+        self.assertIsNone(os.environ.get("OPENROUTER_API_KEY"))
+
+    def test_nul_path_is_refused_with_its_own_reason(self):
+        with self.assertRaises(fetch_usage.CredentialFileError) as ctx:
+            fetch_usage.confined_path(os.path.join(self.root, "a\x00b"), [self.root],
+                                      trust_root=self.trust_root,
+                                      ancestor_uids=self.ancestors)
+        self.assertIn("NUL", str(ctx.exception))
 
     def test_value_with_nul_byte_is_skipped_not_fatal(self):
         path = self.write_file(".env",
@@ -423,12 +468,46 @@ class TestDescriptorGuards(ConfinementTestCase):
             with self.assertRaises(fetch_usage.CredentialFileError):
                 self.read(validated)
 
+    def test_fails_closed_when_the_descriptor_location_cannot_be_verified(self):
+        # No procfs ⇒ the containment half of the re-check cannot run: the read
+        # must be refused, not silently downgraded to a path-only comparison.
+        path = self.write_file("a.env", "OPENROUTER_API_KEY=one\n")
+        with mock.patch.object(fetch_usage, "_PROC_FD_PREFIX",
+                               "/nonexistent-proc/self/fd/"):
+            with self.assertRaises(fetch_usage.CredentialFileError) as ctx:
+                self.read(path)
+        self.assertIn("cannot verify", str(ctx.exception))
+
+    def test_post_read_length_cap_is_enforced(self):
+        # A file that grows past the cap between the fstat and the read must
+        # still be refused: the length is checked after the read too.
+        path = self.write_file("a.env", "OPENROUTER_API_KEY=one\n")
+        real_read = os.read
+        calls = {"n": 0}
+
+        def overlong_read(fd, size):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return b"x" * 512
+            return real_read(fd, size)
+
+        with mock.patch.object(fetch_usage.os, "read", overlong_read):
+            with self.assertRaises(fetch_usage.CredentialFileError) as ctx:
+                self.read(path, max_bytes=256)
+        self.assertIn("too large", str(ctx.exception))
+
 
 class TestProductionTrustDefaults(unittest.TestCase):
     """Exercise the reader helpers through the production trust parameters
     (``trust_root="/"``, ``ancestor_uids=(0,)``) with a fixture under the real
     home directory — a fixture under ``/tmp`` would (correctly) be refused,
-    which is why the other suites inject their own trust root."""
+    which is why the other suites inject their own trust root.
+
+    NOTE: this class writes a temporary directory under ``$HOME`` (removed in
+    ``tearDownClass``); it is the only part of the suite that touches anything
+    outside ``/tmp``.  If the home directory's chain is not trusted (a
+    group-writable home, a foreign-owned mount, a sandbox), the whole class
+    skips loudly rather than passing quietly."""
 
     @classmethod
     def setUpClass(cls):
@@ -443,6 +522,9 @@ class TestProductionTrustDefaults(unittest.TestCase):
         os.chmod(cls.base, 0o700)
         if fetch_usage._trusted_dir(cls.base) is None:
             shutil.rmtree(cls.base, ignore_errors=True)
+            print("SKIPPED: home directory chain is not trusted here — the "
+                  "production-default reader coverage did not run",
+                  file=sys.stderr)
             raise unittest.SkipTest("fixture chain is not trusted in this environment")
 
     @classmethod
@@ -500,7 +582,7 @@ class TestProductionTrustDefaults(unittest.TestCase):
         os.chmod(os.path.join(self.base, ".config", "gh", "hosts.yml"), 0o644)
         self.assertIsNone(fetch_usage._read_github_oauth_token())
 
-    def test_cursor_sqlite_reader_through_the_verified_descriptor(self):
+    def test_cursor_sqlite_reader_reads_the_token(self):
         db_path = os.path.join(self.base, ".cursor", "state.vscdb")
         os.makedirs(os.path.dirname(db_path), mode=0o700, exist_ok=True)
         conn = sqlite3.connect(db_path)
@@ -516,8 +598,25 @@ class TestProductionTrustDefaults(unittest.TestCase):
         os.chmod(db_path, 0o644)
         self.assertIsNone(fetch_usage._read_cursor_token())
 
+    def test_cursor_reader_fails_closed_without_procfs(self):
+        # Without /proc/self/fd there is no way to hand SQLite the validated
+        # descriptor, so the token is dropped rather than read by path again.
+        db_path = os.path.join(self.base, ".cursor", "state.vscdb")
+        os.makedirs(os.path.dirname(db_path), mode=0o700, exist_ok=True)
+        conn = sqlite3.connect(db_path)
+        conn.execute("CREATE TABLE ItemTable (key TEXT, value TEXT)")
+        conn.execute("INSERT INTO ItemTable VALUES (?, ?)",
+                     ("cursorAuth/cachedToken", "cur_example"))
+        conn.commit()
+        conn.close()
+        os.chmod(db_path, 0o600)
+        with mock.patch.object(fetch_usage, "_PROC_FD_PREFIX",
+                               "/nonexistent-proc/self/fd/"):
+            self.assertIsNone(fetch_usage._read_cursor_token())
+
     def test_main_emits_one_valid_json_document(self):
-        env_file = self.write(".hermes/.env", "OPENROUTER_API_KEY=sk-not-a-real-key\n")
+        key = "sk-not-a-real-key"
+        env_file = self.write(".hermes/.env", f"OPENROUTER_API_KEY={key}\n")
         os.environ["HERMES_HOME"] = os.path.join(self.base, ".hermes")
         buffer = io.StringIO()
         with mock.patch.object(fetch_usage._OPENER, "open",
@@ -530,24 +629,50 @@ class TestProductionTrustDefaults(unittest.TestCase):
         data = json.loads(payload)
         self.assertEqual(len(data["providers"]), 13)
         self.assertEqual(data["providers"][1]["id"], "openrouter")
+        # The loader really ran (the key reached the process) …
+        self.assertEqual(os.environ.get("OPENROUTER_API_KEY"), key)
         self.assertTrue(data["providers"][1]["configured"])
-        self.assertNotIn("sk-not-a-real-key", payload)
+        # … and no key material reaches the payload the panel parses.
+        self.assertNotIn(key, payload)
+
+    def test_main_with_the_default_settings_path(self):
+        # Panel.qml passes the default hermesEnvFile value verbatim — a tilde
+        # path — so the no-argument invocation is the production shape.
+        key = "sk-not-a-real-key"
+        self.write(".hermes/.env", f"OPENROUTER_API_KEY={key}\n")
+        buffer = io.StringIO()
+        errors = io.StringIO()
+        with mock.patch.object(fetch_usage._OPENER, "open",
+                               side_effect=urllib.error.URLError("no network")), \
+                mock.patch.object(sys, "argv", ["fetch_usage.py"]), \
+                mock.patch("sys.stdout", buffer), mock.patch("sys.stderr", errors):
+            fetch_usage.main()
+        data = json.loads(buffer.getvalue())
+        self.assertTrue(data["providers"][1]["configured"])
+        self.assertNotIn("refusing", errors.getvalue())
 
     def test_main_with_a_refused_env_file_still_emits_json(self):
+        key = "sk-not-a-real-key"
         env_file = os.path.join(self.base, "outside.env")
         with open(env_file, "w", encoding="utf-8") as fh:
-            fh.write("OPENROUTER_API_KEY=sk-not-a-real-key\n")
+            fh.write(f"OPENROUTER_API_KEY={key}\n")
         os.chmod(env_file, 0o600)
+        os.environ.pop("OPENROUTER_API_KEY", None)
         buffer = io.StringIO()
+        errors = io.StringIO()
         with mock.patch.object(fetch_usage._OPENER, "open",
                                side_effect=urllib.error.URLError("no network")), \
                 mock.patch.object(sys, "argv",
                                   ["fetch_usage.py", "--env", env_file]), \
-                mock.patch("sys.stdout", buffer):
+                mock.patch("sys.stdout", buffer), mock.patch("sys.stderr", errors):
             fetch_usage.main()
-        payload = buffer.getvalue()
-        self.assertEqual(len(json.loads(payload)["providers"]), 13)
-        self.assertNotIn("sk-not-a-real-key", payload)
+        data = json.loads(buffer.getvalue())
+        self.assertEqual(len(data["providers"]), 13)
+        # The refusal must actually happen — not merely "also produce JSON".
+        self.assertIn("refusing credential file", errors.getvalue())
+        self.assertIsNone(os.environ.get("OPENROUTER_API_KEY"))
+        self.assertFalse(data["providers"][1]["configured"])
+        self.assertNotIn(key, buffer.getvalue())
 
 
 if __name__ == "__main__":
