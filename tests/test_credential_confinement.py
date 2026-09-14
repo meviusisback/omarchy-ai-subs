@@ -139,7 +139,8 @@ class TestDotenvAcceptance(ConfinementTestCase):
                  "SSL_CERT_FILE", "SSL_CERT_DIR", "SSLKEYLOGFILE",
                  "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
                  "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
-                 "http_proxy", "https_proxy", "GCONV_PATH", "LOCPATH",
+                 "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+                 "GCONV_PATH", "LOCPATH",
                  "GIT_CONFIG_GLOBAL"]
         before = {name: os.environ.get(name) for name in names}
         path = self.write_file(
@@ -333,6 +334,12 @@ class TestEnvRoots(ConfinementTestCase):
         # HOME=/ would make _is_within(x, home) true for every absolute path.
         os.environ["HOME"] = os.sep
         self.assertNotEqual(fetch_usage._home_dir(), os.sep)
+
+    def test_home_dir_rejects_a_root_home_from_the_passwd_entry(self):
+        os.environ["HOME"] = ""  # force the passwd fallback
+        entry = type("PasswdEntry", (), {"pw_dir": os.sep})()
+        with mock.patch("pwd.getpwuid", return_value=entry):
+            self.assertIsNone(fetch_usage._home_dir())
 
     def test_expand_home_with_empty_home_never_yields_root_path(self):
         os.environ["HOME"] = ""
@@ -613,6 +620,61 @@ class TestProductionTrustDefaults(unittest.TestCase):
         with mock.patch.object(fetch_usage, "_PROC_FD_PREFIX",
                                "/nonexistent-proc/self/fd/"):
             self.assertIsNone(fetch_usage._read_cursor_token())
+
+    def cursor_db(self, relpath, token):
+        path = os.path.join(self.base, relpath)
+        os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+        conn = sqlite3.connect(path)
+        conn.execute("CREATE TABLE ItemTable (key TEXT, value TEXT)")
+        conn.execute("INSERT INTO ItemTable VALUES (?, ?)",
+                     ("cursorAuth/cachedToken", token))
+        conn.commit()
+        conn.close()
+        os.chmod(path, 0o600)
+        return path
+
+    def test_cursor_db_swapped_between_validation_and_open_is_dropped(self):
+        db_path = self.cursor_db(".cursor/state.vscdb", "cur_real")
+        decoy = self.cursor_db(".cursor/decoy.vscdb", "cur_decoy")
+        real_open = os.open
+
+        def swapped_open(path, flags, *args, **kwargs):
+            target = decoy if os.path.realpath(path) == os.path.realpath(db_path) else path
+            return real_open(target, flags, *args, **kwargs)
+
+        with mock.patch.object(fetch_usage.os, "open", swapped_open):
+            self.assertIsNone(fetch_usage._read_cursor_token())
+
+    def test_cursor_reader_hands_sqlite_the_verified_descriptor(self):
+        self.cursor_db(".cursor/state.vscdb", "cur_example")
+        seen = []
+        real_connect = sqlite3.connect
+
+        def spy(database, *args, **kwargs):
+            seen.append(database)
+            return real_connect(database, *args, **kwargs)
+
+        with mock.patch.object(fetch_usage.sqlite3, "connect", spy):
+            token = fetch_usage._read_cursor_token()
+        self.assertIsNotNone(token)
+        self.assertTrue(seen and fetch_usage._PROC_FD_PREFIX in seen[0],
+                        f"SQLite was handed {seen!r} instead of the descriptor")
+
+    def test_cursor_reader_does_not_block_on_a_swapped_fifo(self):
+        fifo = os.path.join(self.base, ".cursor-fifo")
+        os.mkfifo(fifo, 0o600)
+
+        def timed_out(signum, frame):
+            raise AssertionError("blocked on the FIFO — O_NONBLOCK is missing")
+
+        previous = signal.signal(signal.SIGALRM, timed_out)
+        signal.setitimer(signal.ITIMER_REAL, 5)
+        try:
+            with mock.patch.object(fetch_usage, "confined_path", lambda *a, **k: fifo):
+                self.assertIsNone(fetch_usage._read_cursor_token())
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, previous)
 
     def test_main_emits_one_valid_json_document(self):
         key = "sk-not-a-real-key"

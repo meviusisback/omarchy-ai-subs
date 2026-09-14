@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "meviusisback.ai-subs",
   "name": "AI Subs",
-  "version": "1.4.1",
+  "version": "1.4.2",
   "author": "meviusisback",
   "license": "MIT",
   "description": "AI subscription usage/balance in the Omarchy bar: OpenCode Go, OpenRouter, Claude Code, Codex, Command Code, DeepSeek, Kimi, NovitaAI, ZAI, Alibaba, Arcee, GitHub Copilot and Cursor — meter bars, credit balances and live reset countdowns.",
