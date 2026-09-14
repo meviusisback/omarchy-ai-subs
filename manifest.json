@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "meviusisback.ai-subs",
   "name": "AI Subs",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "author": "meviusisback",
   "license": "MIT",
   "description": "AI subscription usage/balance in the Omarchy bar: OpenCode Go, OpenRouter, Claude Code, Codex, Command Code, DeepSeek, Kimi, NovitaAI, ZAI, Alibaba, Arcee, GitHub Copilot and Cursor — meter bars, credit balances and live reset countdowns.",
@@ -24,7 +24,7 @@
     },
     "schema": [
       { "key": "refreshIntervalSec", "type": "integer", "label": "Refresh interval (seconds)", "min": 30, "max": 3600, "step": 30, "defaultValue": 900 },
-      { "key": "hermesEnvFile", "type": "path", "label": "Hermes .env file", "defaultValue": "~/.hermes/.env" },
+      { "key": "hermesEnvFile", "type": "path", "label": "Hermes .env file", "defaultValue": "~/.hermes/.env", "description": "Provider API keys. Must live inside the Hermes profile directory ($HERMES_HOME \u2014 when it is inside your home \u2014 or ~/.hermes), be a regular single-linked 0600 file owned by you, and not be a symlink \u2014 anything else is refused (reason logged in the shell log)." },
       { "key": "barDisplay", "type": "enum", "label": "Bar display", "options": ["Icon", "Data"], "defaultValue": "Data", "description": "Icon shows the Sigma glyph; Data shows a compact one-liner for the default sub." },
       { "key": "defaultSub", "type": "enum", "label": "Default sub (Data mode)", "options": ["opencode", "openrouter", "claude", "codex", "commandcode", "deepseek", "kimi", "novita", "zai", "alibaba", "arcee", "copilot", "cursor"], "defaultValue": "opencode", "description": "Which subscription the bar shows when Bar display is Data." }
     ]
