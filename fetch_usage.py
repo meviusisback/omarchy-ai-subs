@@ -6,10 +6,12 @@ reads provider API keys from the Hermes profile .env, queries each vendor's
 usage/balance endpoint in parallel, and prints a JSON document the QML panel
 renders. Stdlib-only (urllib) so it runs under the system python3 with no deps.
 
-Every credential file (the --env file, native config files, OAuth token stores)
+Every CREDENTIAL file (the --env file, native config files, OAuth token stores)
 is confined to a trusted directory and validated before it is read — regular
 single-linked file, owned by the user, no group/other permission bits, size cap,
-no symlink at the path, verified descriptor.  See ``confined_path``.
+no symlink at the path, verified descriptor.  See ``confined_path``.  The one
+deliberate exception is ``_fetch_collector``: it reads non-secret Omarchy usage
+records from a path built from a constant agent id, not from configuration.
 
 Provider mapping (display -> vendor -> metric):
   OC OpenCode Go      % used (rolling 5h / weekly / monthly)
@@ -30,6 +32,7 @@ Provider mapping (display -> vendor -> metric):
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime
 import gc
 import json
@@ -128,6 +131,7 @@ class SentinelToken:
 # --------------------------------------------------------------------------- #
 _MAX_NATIVE_BYTES = 65536
 MAX_CREDENTIAL_BYTES = 262144  # 256 KiB — far above any real .env/credential file
+_PROC_FD_PREFIX = "/proc/self/fd/"
 
 
 class CredentialFileError(Exception):
@@ -150,8 +154,12 @@ def _home_dir() -> str | None:
 
 
 def _expand_home(path: str) -> str:
-    """``~`` expansion anchored on a validated home directory."""
-    if isinstance(path, str) and path.startswith("~"):
+    """``~`` expansion anchored on a validated home directory.
+
+    Only a bare ``~`` or ``~/…`` is expanded; ``~user`` is left untouched (it
+    names another account, and ``confined_path`` then refuses it as a
+    non-absolute path) instead of being mangled into ``/home/<user>user/…``."""
+    if isinstance(path, str) and (path == "~" or path.startswith("~/")):
         home = _home_dir()
         if not home:
             return path
@@ -237,14 +245,22 @@ def confined_path(path: str, roots, max_bytes: int = _MAX_NATIVE_BYTES, uid=None
     if not isinstance(path, str) or not path.strip():
         raise CredentialFileError("empty path")
     uid = os.getuid() if uid is None else uid
+    if "\x00" in path:
+        raise CredentialFileError("path contains NUL")
     raw = _expand_home(path.strip())
     if not os.path.isabs(raw):
         raise CredentialFileError("not an absolute path")
     if os.pardir in raw.split(os.sep):
         raise CredentialFileError("path contains '..'")
-    if os.path.islink(raw):
-        raise CredentialFileError("symlink refused")
-    real = os.path.realpath(raw)
+    # Normalise BEFORE the symlink test: os.path.islink("link/") is False for a
+    # symlink to a regular file, so a trailing slash would slip past it.
+    raw = os.path.normpath(raw)
+    try:
+        if os.path.islink(raw):
+            raise CredentialFileError("symlink refused")
+        real = os.path.realpath(raw)
+    except (OSError, ValueError) as exc:
+        raise CredentialFileError(f"cannot resolve: {exc}") from exc
     inside = _containing_root(real, roots, uid, ancestor_uids, trust_root)
     if inside is None:
         raise CredentialFileError("outside every trusted credential directory")
@@ -272,10 +288,13 @@ def read_confined_text(path: str, roots, max_bytes: int = MAX_CREDENTIAL_BYTES,
     """Read a validated credential file through a verified descriptor.
 
     ``confined_path`` validates the path; the file is then opened with
-    ``O_NOFOLLOW`` and re-validated on the descriptor (``fstat`` plus the
-    ``/proc/self/fd`` realpath), so a path swapped between the two steps cannot
-    redirect the read.  ``O_NONBLOCK`` keeps a FIFO planted at the path from
-    wedging the refresh tick.  Raises ``CredentialFileError``."""
+    ``O_NOFOLLOW`` and re-validated on the descriptor itself (``fstat`` plus an
+    identity match against the validated path, and — where procfs resolves — a
+    containment check on the descriptor's real path), so a path swapped between
+    the two steps is detected rather than read.  ``O_NONBLOCK`` keeps a FIFO
+    planted at the path from wedging the refresh tick.  Raises
+    ``CredentialFileError``.  Residual: without a readable ``/proc`` the
+    containment half of the re-check cannot run (identity still does)."""
     real = confined_path(path, roots, max_bytes, uid, ancestor_uids, trust_root)
     uid = os.getuid() if uid is None else uid
     flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK
@@ -287,10 +306,15 @@ def read_confined_text(path: str, roots, max_bytes: int = MAX_CREDENTIAL_BYTES,
         raise CredentialFileError(f"cannot open: {exc.strerror or 'error'}") from exc
     chunks: list[bytes] = []
     try:
-        fd_real = os.path.realpath(f"/proc/self/fd/{fd}")
-        if _containing_root(fd_real, roots, uid, ancestor_uids, trust_root) is None:
-            raise CredentialFileError("descriptor escaped the trusted directory")
         st = os.fstat(fd)
+        # The descriptor must be the very file that was validated: a path swapped
+        # between the validation and this open cannot redirect the read.
+        try:
+            same_file = os.path.samestat(st, os.stat(real))
+        except OSError:
+            same_file = False
+        if not same_file:
+            raise CredentialFileError("descriptor does not match the validated path")
         if not stat.S_ISREG(st.st_mode):
             raise CredentialFileError("not a regular file")
         if st.st_uid != uid:
@@ -301,6 +325,13 @@ def read_confined_text(path: str, roots, max_bytes: int = MAX_CREDENTIAL_BYTES,
             raise CredentialFileError("group/other permission bits set")
         if st.st_size > max_bytes:
             raise CredentialFileError("file too large")
+        # Where procfs is readable the descriptor must also resolve inside the
+        # trusted tree (catches a swapped directory or a mount boundary).  An
+        # unreadable /proc is not a refusal — the identity check above holds.
+        fd_real = os.path.realpath(_PROC_FD_PREFIX + str(fd))
+        if not fd_real.startswith(_PROC_FD_PREFIX):
+            if _containing_root(fd_real, roots, uid, ancestor_uids, trust_root) is None:
+                raise CredentialFileError("descriptor escaped the trusted directory")
         remaining = max_bytes + 1
         while remaining > 0:
             chunk = os.read(fd, min(65536, remaining))
@@ -311,7 +342,8 @@ def read_confined_text(path: str, roots, max_bytes: int = MAX_CREDENTIAL_BYTES,
     except OSError as exc:
         raise CredentialFileError(f"cannot read: {exc.strerror or 'error'}") from exc
     finally:
-        os.close(fd)
+        with contextlib.suppress(OSError):
+            os.close(fd)
     raw = b"".join(chunks)
     if len(raw) > max_bytes:
         raise CredentialFileError("file too large")
@@ -323,12 +355,22 @@ def read_confined_text(path: str, roots, max_bytes: int = MAX_CREDENTIAL_BYTES,
 
 def hermes_env_roots(uid=None, ancestor_uids=(0,), trust_root: str = "/") -> list[str]:
     """Directories a Hermes ``.env`` may live in: the active profile root
-    (``$HERMES_HOME`` when set and trustworthy) and the default ``~/.hermes``.
-    Profile env files (``~/.hermes/profiles/<name>/.env``) are covered by the
-    root, so they need no separate entry."""
+    (``$HERMES_HOME`` when it is set, trustworthy and inside the home directory)
+    and the default ``~/.hermes``.  Profile env files
+    (``~/.hermes/profiles/<name>/.env``) are covered by the root, so they need
+    no separate entry."""
     uid = os.getuid() if uid is None else uid
-    candidates = [os.environ.get("HERMES_HOME", "")]
     home = _home_dir()
+    candidates: list[str] = []
+    hermes_home = os.environ.get("HERMES_HOME", "")
+    if hermes_home and home:
+        # Only a profile directory INSIDE the home may widen the roots:
+        # HERMES_HOME=$HOME would otherwise turn every private file in the home
+        # directory (ssh keys, cloud credentials) into an acceptable credential
+        # file for the --env setting.
+        if _is_within(os.path.realpath(_expand_home(hermes_home)),
+                      os.path.realpath(home)):
+            candidates.append(hermes_home)
     if home:
         candidates.append(os.path.join(home, ".hermes"))
     roots: list[str] = []
@@ -434,13 +476,27 @@ def _read_cursor_token() -> SentinelToken | None:
     try:
         real = confined_path(db_path, [os.path.dirname(db_path)],
                              max_bytes=10 * 1024 * 1024)
-    except CredentialFileError:
-        return None
-    if any(ch in real for ch in "?#"):  # would break the SQLite URI below
+        if any(ch in real for ch in "?#"):  # would break the SQLite URI below
+            return None
+        flags = os.O_RDONLY | os.O_CLOEXEC
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(real, flags)
+    except (CredentialFileError, OSError):
         return None
     try:
-        uri = f"file:{real}?mode=ro"
-        conn = sqlite3.connect(uri, uri=True, timeout=5)
+        st = os.fstat(fd)
+        if (not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid()
+                or st.st_nlink != 1 or st.st_mode & 0o077):
+            return None
+        if not os.path.samestat(st, os.stat(real)):
+            return None
+        # SQLite re-opens the path it is given, so hand it the descriptor that
+        # was just validated: /proc/self/fd/<fd> resolves to this same file and
+        # cannot be swapped between validation and the open.
+        fd_ref = _PROC_FD_PREFIX + str(fd)
+        source = fd_ref if os.path.exists(fd_ref) else real
+        conn = sqlite3.connect(f"file:{source}?mode=ro", uri=True, timeout=5)
         try:
             cur = conn.execute(
                 "SELECT value FROM ItemTable WHERE key = ?",
@@ -451,8 +507,11 @@ def _read_cursor_token() -> SentinelToken | None:
                 return SentinelToken(row[0])
         finally:
             conn.close()
-    except (OSError, sqlite3.Error):
+    except (OSError, sqlite3.Error, ValueError):
         pass
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(fd)
     return None
 
 
@@ -1116,7 +1175,9 @@ _ENV_DENYLIST = frozenset({
     "PATH", "HOME", "IFS", "ENV", "BASH_ENV", "SHELLOPTS",
     "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT",
     "PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP",
-    "XDG_CONFIG_HOME", "XDG_RUNTIME_DIR",
+    "XDG_CONFIG_HOME", "XDG_RUNTIME_DIR", "HERMES_HOME", "TMPDIR",
+    "SSL_CERT_FILE", "SSL_CERT_DIR", "SSLKEYLOGFILE",
+    "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
     "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM",
 })
 _ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
@@ -1143,7 +1204,7 @@ def load_hermes_dotenv(path: str, roots=None, max_bytes: int = MAX_CREDENTIAL_BY
     except CredentialFileError as exc:
         print(f"hermes-usage: refusing credential file {path}: {exc}", file=sys.stderr)
         return False
-    for line in text.splitlines():
+    for line in text.split("\n"):
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
@@ -1152,6 +1213,8 @@ def load_hermes_dotenv(path: str, roots=None, max_bytes: int = MAX_CREDENTIAL_BY
         key = key.strip()
         value = value.strip()
         if not _ENV_NAME_RE.match(key):
+            continue
+        if "\x00" in value:  # os.environ rejects NUL — skip rather than crash
             continue
         if key in _ENV_DENYLIST:
             print(f"hermes-usage: ignoring {key} from the credential file",
@@ -1178,7 +1241,8 @@ def main() -> None:
     parser.add_argument("--env", default=_expand_home("~/.hermes/.env"),
                         help="Path to the Hermes profile .env file with provider API "
                              "keys. Must live inside the Hermes profile directory "
-                             "($HERMES_HOME or ~/.hermes), or it is refused.")
+                             "($HERMES_HOME — when it is inside your home — or "
+                             "~/.hermes), or it is refused.")
     args = parser.parse_args()
 
     load_hermes_dotenv(args.env)
