@@ -6,6 +6,11 @@ reads provider API keys from the Hermes profile .env, queries each vendor's
 usage/balance endpoint in parallel, and prints a JSON document the QML panel
 renders. Stdlib-only (urllib) so it runs under the system python3 with no deps.
 
+Every credential file (the --env file, native config files, OAuth token stores)
+is confined to a trusted directory and validated before it is read — regular
+single-linked file, owned by the user, no group/other permission bits, size cap,
+no symlink at the path, verified descriptor.  See ``confined_path``.
+
 Provider mapping (display -> vendor -> metric):
   OC OpenCode Go      % used (rolling 5h / weekly / monthly)
   OR OpenRouter       USD credits remaining
@@ -34,6 +39,7 @@ import re
 import ssl
 import stat
 import sqlite3
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -118,90 +124,250 @@ class SentinelToken:
 
 
 # --------------------------------------------------------------------------- #
-# File integrity — symlink / permissions / ownership checks
+# Confined credential reads — one trust implementation for every secret file
 # --------------------------------------------------------------------------- #
-def _check_file_integrity(path: str, expected_dir: str) -> bool:
-    """Verify a credential file is safe to read: regular file, owned by us,
-    not world-readable/writable, and not a symlink escaping expected_dir."""
+_MAX_NATIVE_BYTES = 65536
+MAX_CREDENTIAL_BYTES = 262144  # 256 KiB — far above any real .env/credential file
+
+
+class CredentialFileError(Exception):
+    """A credential file was refused by the confinement or validation rules."""
+
+
+def _home_dir() -> str | None:
+    """The real home directory: ``$HOME`` when it is absolute and exists, else
+    the passwd entry.  ``os.path.expanduser("~")`` yields ``/`` for an empty
+    ``HOME``, which would silently relocate every credential path."""
+    home = os.environ.get("HOME", "")
+    if home and os.path.isabs(home) and os.path.isdir(home):
+        return home
     try:
-        real = os.path.realpath(path)
-        if not real.startswith(os.path.realpath(expected_dir) + os.sep
-                              if not os.path.isdir(os.path.realpath(expected_dir))
-                              else os.path.realpath(expected_dir) + os.sep):
-            return False
-        st = os.stat(real)
-        if not stat.S_ISREG(st.st_mode):
-            return False
-        if st.st_uid != os.getuid():
-            return False
-        if st.st_mode & 0o077:  # world- or group-readable/writable
-            return False
-        parent = os.stat(os.path.dirname(real))
-        if parent.st_mode & stat.S_IWOTH:  # parent world-writable
-            return False
-        return True
-    except OSError:
+        import pwd
+
+        return pwd.getpwuid(os.getuid()).pw_dir or None
+    except (ImportError, KeyError, OSError):
+        return None
+
+
+def _expand_home(path: str) -> str:
+    """``~`` expansion anchored on a validated home directory."""
+    if isinstance(path, str) and path.startswith("~"):
+        home = _home_dir()
+        if not home:
+            return path
+        return home + path[1:]
+    return path
+
+
+def _is_within(child: str, parent: str) -> bool:
+    """True when realpath *child* is strictly inside directory *parent*."""
+    try:
+        return os.path.commonpath([child, parent]) == parent and child != parent
+    except ValueError:  # mixed absolute/relative paths
         return False
+
+
+def _dir_chain_is_trusted(path: str, uid: int, ancestor_uids, trust_root: str) -> bool:
+    """Every directory from *path* up to *trust_root* must be owned by *uid* or
+    a trusted ancestor uid and must not be group- or world-writable.  Above
+    *trust_root* nothing is examined (tests anchor this at their own fixture)."""
+    current = os.path.realpath(path)
+    trust_root = os.path.realpath(trust_root)
+    while True:
+        try:
+            st = os.stat(current)
+        except OSError:
+            return False
+        if not stat.S_ISDIR(st.st_mode):
+            return False
+        if st.st_uid != uid and st.st_uid not in ancestor_uids:
+            return False
+        if st.st_mode & 0o022:
+            return False
+        if current == trust_root:
+            return True
+        parent = os.path.dirname(current)
+        if parent == current:  # reached / without meeting trust_root
+            return False
+        current = parent
+
+
+def _trusted_dir(path: str, uid=None, ancestor_uids=(0,), trust_root="/") -> str | None:
+    """Realpath of *path* when it is a trustworthy root for credential files: an
+    existing directory owned by us, not group/world-writable, with a trusted
+    ancestor chain.  ``None`` otherwise."""
+    if not isinstance(path, str) or not path:
+        return None
+    uid = os.getuid() if uid is None else uid
+    real = os.path.realpath(_expand_home(path))
+    try:
+        st = os.stat(real)
+    except OSError:
+        return None
+    if not stat.S_ISDIR(st.st_mode):
+        return None
+    if st.st_uid != uid:
+        return None
+    if st.st_mode & 0o022:
+        return None
+    if not _dir_chain_is_trusted(real, uid, ancestor_uids, trust_root):
+        return None
+    return real
+
+
+def _containing_root(real: str, roots, uid: int, ancestor_uids, trust_root: str) -> str | None:
+    """The trusted root that strictly contains *real*, or None."""
+    for root in roots if isinstance(roots, (list, tuple)) else []:
+        root_real = _trusted_dir(root, uid, ancestor_uids, trust_root)
+        if root_real and _is_within(real, root_real):
+            return root_real
+    return None
+
+
+def confined_path(path: str, roots, max_bytes: int = _MAX_NATIVE_BYTES, uid=None,
+                  ancestor_uids=(0,), trust_root: str = "/") -> str:
+    """Validate *path* against *roots* and return the real path to read.
+
+    A credential file must be a regular, single-linked file resolving strictly
+    inside one of *roots*, owned by the running user, with no group/other
+    permission bits, no larger than *max_bytes*, and reachable through
+    directories nobody else can write to.  A symlink at the path itself is
+    refused (directory symlinks are resolved by ``realpath`` and must still land
+    inside the root).  Raises ``CredentialFileError``."""
+    if not isinstance(path, str) or not path.strip():
+        raise CredentialFileError("empty path")
+    uid = os.getuid() if uid is None else uid
+    raw = _expand_home(path.strip())
+    if not os.path.isabs(raw):
+        raise CredentialFileError("not an absolute path")
+    if os.pardir in raw.split(os.sep):
+        raise CredentialFileError("path contains '..'")
+    if os.path.islink(raw):
+        raise CredentialFileError("symlink refused")
+    real = os.path.realpath(raw)
+    inside = _containing_root(real, roots, uid, ancestor_uids, trust_root)
+    if inside is None:
+        raise CredentialFileError("outside every trusted credential directory")
+    try:
+        st = os.stat(real)
+    except OSError as exc:
+        raise CredentialFileError(f"cannot stat: {exc.strerror or 'error'}") from exc
+    if not stat.S_ISREG(st.st_mode):
+        raise CredentialFileError("not a regular file")
+    if st.st_uid != uid:
+        raise CredentialFileError("not owned by the current user")
+    if st.st_nlink != 1:
+        raise CredentialFileError("multiple hard links")
+    if st.st_mode & 0o077:
+        raise CredentialFileError("group/other permission bits set")
+    if st.st_size > max_bytes:
+        raise CredentialFileError("file too large")
+    if not _dir_chain_is_trusted(os.path.dirname(real), uid, ancestor_uids, inside):
+        raise CredentialFileError("directory chain is not trusted")
+    return real
+
+
+def read_confined_text(path: str, roots, max_bytes: int = MAX_CREDENTIAL_BYTES,
+                       uid=None, ancestor_uids=(0,), trust_root: str = "/") -> str:
+    """Read a validated credential file through a verified descriptor.
+
+    ``confined_path`` validates the path; the file is then opened with
+    ``O_NOFOLLOW`` and re-validated on the descriptor (``fstat`` plus the
+    ``/proc/self/fd`` realpath), so a path swapped between the two steps cannot
+    redirect the read.  ``O_NONBLOCK`` keeps a FIFO planted at the path from
+    wedging the refresh tick.  Raises ``CredentialFileError``."""
+    real = confined_path(path, roots, max_bytes, uid, ancestor_uids, trust_root)
+    uid = os.getuid() if uid is None else uid
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(real, flags)
+    except OSError as exc:
+        raise CredentialFileError(f"cannot open: {exc.strerror or 'error'}") from exc
+    chunks: list[bytes] = []
+    try:
+        fd_real = os.path.realpath(f"/proc/self/fd/{fd}")
+        if _containing_root(fd_real, roots, uid, ancestor_uids, trust_root) is None:
+            raise CredentialFileError("descriptor escaped the trusted directory")
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise CredentialFileError("not a regular file")
+        if st.st_uid != uid:
+            raise CredentialFileError("not owned by the current user")
+        if st.st_nlink != 1:
+            raise CredentialFileError("multiple hard links")
+        if st.st_mode & 0o077:
+            raise CredentialFileError("group/other permission bits set")
+        if st.st_size > max_bytes:
+            raise CredentialFileError("file too large")
+        remaining = max_bytes + 1
+        while remaining > 0:
+            chunk = os.read(fd, min(65536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+    except OSError as exc:
+        raise CredentialFileError(f"cannot read: {exc.strerror or 'error'}") from exc
+    finally:
+        os.close(fd)
+    raw = b"".join(chunks)
+    if len(raw) > max_bytes:
+        raise CredentialFileError("file too large")
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise CredentialFileError("not valid UTF-8") from exc
+
+
+def hermes_env_roots(uid=None, ancestor_uids=(0,), trust_root: str = "/") -> list[str]:
+    """Directories a Hermes ``.env`` may live in: the active profile root
+    (``$HERMES_HOME`` when set and trustworthy) and the default ``~/.hermes``.
+    Profile env files (``~/.hermes/profiles/<name>/.env``) are covered by the
+    root, so they need no separate entry."""
+    uid = os.getuid() if uid is None else uid
+    candidates = [os.environ.get("HERMES_HOME", "")]
+    home = _home_dir()
+    if home:
+        candidates.append(os.path.join(home, ".hermes"))
+    roots: list[str] = []
+    for candidate in candidates:
+        real = _trusted_dir(candidate, uid, ancestor_uids, trust_root)
+        if real and real not in roots:
+            roots.append(real)
+    return roots
 
 
 # --------------------------------------------------------------------------- #
 # Native credential readers — JSON and TOML
 # --------------------------------------------------------------------------- #
-_MAX_NATIVE_BYTES = 65536
-
-
-def _read_native_key(file_path: str, key_paths: list[list[str]]) -> str | None:
-    """Read an API key from a JSON auth file.  *key_paths* is a list of
-    path walks to try in order (e.g. [["opencode-go", "key"]])."""
-    expanded = os.path.expanduser(file_path)
-    expected_dir = os.path.dirname(expanded)
-    if not _check_file_integrity(expanded, expected_dir):
+def _read_confined_json(file_path: str, roots, max_bytes: int = _MAX_NATIVE_BYTES):
+    """Parse a validated JSON credential file.  ``None`` when the file is
+    refused, unreadable or not a JSON object."""
+    try:
+        raw = read_confined_text(file_path, roots, max_bytes)
+    except CredentialFileError:
         return None
     try:
-        real = os.path.realpath(os.path.expanduser(file_path))
-        if not os.path.isfile(real):
-            return None
-        if os.path.getsize(real) > _MAX_NATIVE_BYTES:
-            return None
-        with open(real, "r", encoding="utf-8") as fh:
-            raw = fh.read(_MAX_NATIVE_BYTES + 1)
-        if len(raw) > _MAX_NATIVE_BYTES:
-            return None
         data = json.loads(raw)
-        if not isinstance(data, dict):
-            return None
-    except (OSError, json.JSONDecodeError, ValueError):
+    except (json.JSONDecodeError, ValueError):
         return None
-
-    for path in key_paths:
-        val = data
-        for segment in path:
-            if not isinstance(val, dict):
-                val = None
-                break
-            val = val.get(segment)
-        if isinstance(val, str) and val:
-            return val
-    return None
+    return data if isinstance(data, dict) else None
 
 
 def _read_toml_key(file_path: str, key_path: list[str]) -> str | None:
     """Read an API key from a TOML config file (DeepSeek, Kimi)."""
     if tomllib is None:
         return None
-    expanded = os.path.expanduser(file_path)
-    expected_dir = os.path.dirname(expanded)
-    if not _check_file_integrity(expanded, expected_dir):
+    expanded = _expand_home(file_path)
+    try:
+        raw = read_confined_text(expanded, [os.path.dirname(expanded)])
+    except CredentialFileError:
         return None
     try:
-        real = os.path.realpath(os.path.expanduser(file_path))
-        if not os.path.isfile(real):
-            return None
-        if os.path.getsize(real) > _MAX_NATIVE_BYTES:
-            return None
-        with open(real, "rb") as fh:
-            data = tomllib.load(fh)
-    except (OSError, tomllib.TOMLDecodeError if tomllib else OSError, ValueError):
+        data = tomllib.loads(raw)
+    except (tomllib.TOMLDecodeError, ValueError):
         return None
 
     val = data
@@ -217,19 +383,9 @@ def _read_toml_key(file_path: str, key_path: list[str]) -> str | None:
 def _read_oauth_token(file_path: str, key_path: list[str],
                        expected_dir: str) -> SentinelToken | None:
     """Read an OAuth token and wrap it in SentinelToken for safe handling.
-    Returns None if the file fails integrity checks."""
-    if not _check_file_integrity(file_path, expected_dir):
-        return None
-    try:
-        real = os.path.realpath(os.path.expanduser(file_path))
-        if os.path.getsize(real) > _MAX_NATIVE_BYTES:
-            return None
-        with open(real, "r", encoding="utf-8") as fh:
-            raw = fh.read(_MAX_NATIVE_BYTES + 1)
-        if len(raw) > _MAX_NATIVE_BYTES:
-            return None
-        data = json.loads(raw)
-    except (OSError, json.JSONDecodeError, ValueError):
+    Returns None if the file is refused by the credential-file checks."""
+    data = _read_confined_json(file_path, [expected_dir])
+    if data is None:
         return None
 
     val = data
@@ -249,39 +405,40 @@ def _read_github_oauth_token() -> SentinelToken | None:
     if env_token:
         return SentinelToken(env_token)
 
-    gh_config = os.path.expanduser("~/.config/gh/hosts.yml")
-    if os.path.isfile(gh_config) and _check_file_integrity(gh_config, os.path.expanduser("~/.config/gh")):
-        try:
-            with open(gh_config, "r", encoding="utf-8") as fh:
-                for line in fh:
-                    line = line.strip()
-                    if line.startswith("oauth_token:"):
-                        _, _, val = line.partition(":")
-                        val = val.strip().strip("\"'")
-                        if val:
-                            return SentinelToken(val)
-        except OSError:
-            pass
+    gh_dir = _expand_home("~/.config/gh")
+    gh_config = os.path.join(gh_dir, "hosts.yml")
+    try:
+        raw = read_confined_text(gh_config, [gh_dir])
+    except CredentialFileError:
+        raw = ""
+    for line in raw.splitlines():
+        line = line.strip()
+        if line.startswith("oauth_token:"):
+            _, _, val = line.partition(":")
+            val = val.strip().strip("\"'")
+            if val:
+                return SentinelToken(val)
 
-    apps_json = os.path.expanduser("~/.config/github-copilot/apps.json")
-    if os.path.isfile(apps_json):
-        token = _read_oauth_token(apps_json, ["github.com", "oauth_token"],
-                                  os.path.expanduser("~/.config/github-copilot"))
-        if token:
-            return token
+    apps_json = _expand_home("~/.config/github-copilot/apps.json")
+    token = _read_oauth_token(apps_json, ["github.com", "oauth_token"],
+                              os.path.dirname(apps_json))
+    if token:
+        return token
 
     return None
 
 
 def _read_cursor_token() -> SentinelToken | None:
     """Read the Cursor access token from its local SQLite state DB."""
-    db_path = os.path.expanduser("~/.cursor/state.vscdb")
-    if not _check_file_integrity(db_path, os.path.expanduser("~/.cursor")):
+    db_path = _expand_home("~/.cursor/state.vscdb")
+    try:
+        real = confined_path(db_path, [os.path.dirname(db_path)],
+                             max_bytes=10 * 1024 * 1024)
+    except CredentialFileError:
+        return None
+    if any(ch in real for ch in "?#"):  # would break the SQLite URI below
         return None
     try:
-        real = os.path.realpath(db_path)
-        if os.path.getsize(real) > 10 * 1024 * 1024:  # 10MB cap
-            return None
         uri = f"file:{real}?mode=ro"
         conn = sqlite3.connect(uri, uri=True, timeout=5)
         try:
@@ -953,45 +1110,75 @@ def _transport_error(exc):
     return "unknown-error"
 
 
-def load_hermes_dotenv(path: str) -> None:
+# Environment variables a credential file must never set: they choose which code
+# runs (or where paths resolve), not which key is used.
+_ENV_DENYLIST = frozenset({
+    "PATH", "HOME", "IFS", "ENV", "BASH_ENV", "SHELLOPTS",
+    "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT",
+    "PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP",
+    "XDG_CONFIG_HOME", "XDG_RUNTIME_DIR",
+    "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM",
+})
+_ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+
+
+def load_hermes_dotenv(path: str, roots=None, max_bytes: int = MAX_CREDENTIAL_BYTES,
+                       uid=None, ancestor_uids=(0,), trust_root: str = "/") -> bool:
     """Load KEY=VALUE pairs from a Hermes .env file into os.environ.
+
+    The file is confined to *roots* (the Hermes profile directories by default)
+    and validated before a byte is read — see ``confined_path``.  A refused file
+    is reported once on stderr (which the panel captures separately from stdout)
+    and skipped: the widget still renders, providers simply report ``no-key``.
 
     Handles common dotenv idioms: an optional leading ``export``, single- or
     double-quoted values (including a ``#`` inside quotes), and a trailing
-    ``# comment`` on unquoted values.
+    ``# comment`` on unquoted values.  Returns True when the file was read.
+    The trust parameters are injectable so the rules are testable without root.
     """
-    path = os.path.expanduser(path)
-    if not os.path.isfile(path):
-        return
-    with open(path, "r", encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            line = re.sub(r"^export\s+", "", line)
-            key, _, value = line.partition("=")
-            key = key.strip()
-            value = value.strip()
-            if value and value[0] in "\"'":
-                # Quoted value: capture up to the matching closing quote.
-                quote = value[0]
-                rest = value[1:]
-                end = rest.find(quote)
-                if end != -1:
-                    value = rest[:end]
-                else:
-                    value = rest
+    if roots is None:
+        roots = hermes_env_roots(uid, ancestor_uids, trust_root)
+    try:
+        text = read_confined_text(path, roots, max_bytes, uid, ancestor_uids, trust_root)
+    except CredentialFileError as exc:
+        print(f"hermes-usage: refusing credential file {path}: {exc}", file=sys.stderr)
+        return False
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        line = re.sub(r"^export\s+", "", line)
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip()
+        if not _ENV_NAME_RE.match(key):
+            continue
+        if key in _ENV_DENYLIST:
+            print(f"hermes-usage: ignoring {key} from the credential file",
+                  file=sys.stderr)
+            continue
+        if value and value[0] in "\"'":
+            # Quoted value: capture up to the matching closing quote.
+            quote = value[0]
+            rest = value[1:]
+            end = rest.find(quote)
+            if end != -1:
+                value = rest[:end]
             else:
-                # Unquoted value: the first unescaped ' #' starts a comment.
-                value = re.split(r"\s+#", value, maxsplit=1)[0].rstrip()
-            if key:
-                os.environ[key] = value.strip()
+                value = rest
+        else:
+            # Unquoted value: the first unescaped ' #' starts a comment.
+            value = re.split(r"\s+#", value, maxsplit=1)[0].rstrip()
+        os.environ[key] = value.strip()
+    return True
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Fetch Hermes provider usage/balance as JSON.")
-    parser.add_argument("--env", default=os.path.expanduser("~/.hermes/.env"),
-                        help="Path to the Hermes profile .env file with provider API keys.")
+    parser.add_argument("--env", default=_expand_home("~/.hermes/.env"),
+                        help="Path to the Hermes profile .env file with provider API "
+                             "keys. Must live inside the Hermes profile directory "
+                             "($HERMES_HOME or ~/.hermes), or it is refused.")
     args = parser.parse_args()
 
     load_hermes_dotenv(args.env)
