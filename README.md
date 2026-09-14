@@ -96,14 +96,14 @@ Every credential file the fetcher opens is confined and validated first. The
 - be a regular file owned by you with no group/other permission bits
   (`chmod 600`), and no symlink at that exact path (a symlinked *directory*,
   e.g. dotfiles-managed `~/.hermes`, is fine);
-- be a single-linked file (no hard links) no larger than 256 KiB (64 KiB for the
-  native config files);
+- be a single-linked file (no hard links) no larger than 256 KiB for the key
+  file (64 KiB for the native config files, 10 MiB for the Cursor token store);
 - sit behind directories nobody else can write to.
 
-Anything else is refused: the widget keeps working and the reason is logged
-(`journalctl --user -u omarchy-shell` / the shell log), while the affected
-providers simply report "not configured". The same rules apply to the native
-config files and OAuth token stores the fetcher reads.
+Anything else is refused: the widget keeps working, the affected providers
+simply report "not configured", and the reason is logged for the key file
+(`journalctl --user -u omarchy-shell` / the shell log). The same rules apply to
+the native config files and OAuth token stores the fetcher reads.
 
 ## Update & Remove
 
