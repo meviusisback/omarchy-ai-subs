@@ -973,7 +973,12 @@ def _fetch_collector(agent_id):
         if not isinstance(entry, dict) or entry.get("percent") is None:
             continue
         try:
-            percent = round(_finite(entry["percent"]), 1)
+            # Omarchy's agent collectors write a FRACTION (0..1) into a field
+            # named "percent": normalize_utilization() returns min(1.0, n/100).
+            # Scale to a real percentage, or Claude/Codex read 100x too low
+            # (71% of the weekly limit rendering as "0.7%").
+            raw_pct = _finite(entry["percent"])
+            percent = round(raw_pct * 100.0, 1) if raw_pct <= 1.0 else round(raw_pct, 1)
         except (TypeError, ValueError):
             continue
         short = _short_window_label(entry.get("title") or entry.get("label"))
