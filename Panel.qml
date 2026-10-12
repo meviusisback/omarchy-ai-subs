@@ -27,6 +27,8 @@ Panel {
   readonly property color track: Style.selectedFillFor(foreground, Color.accent)
 
   property var providers: []
+  property var cnHolidays: []
+  property var cnHolidaysYears: []
   property bool loading: true
   property string errorText: ""
   property bool settingsOpen: false
@@ -114,6 +116,57 @@ Panel {
     return Math.max(1, minutes) + "m"
   }
 
+  // DeepSeek peak/off-peak pricing (UTC): peak Mon-Fri 01:00-04:00 and
+  // 06:00-10:00; off-peak the other 17 weekday hours, all of Sat/Sun and
+  // every Chinese public holiday (full UTC days from Nager.Date, see
+  // fetch_usage.py _load_cn_holidays). Pure UTC clock math — no timezone
+  // offsets, DST-immune. Holidays only flip peak to off, never the reverse.
+  function dsIsHolidayUTC(d) {
+    var key = d.getUTCFullYear() + "-" + ("0" + (d.getUTCMonth() + 1)).slice(-2) + "-" + ("0" + d.getUTCDate()).slice(-2)
+    return (root.cnHolidays || []).indexOf(key) !== -1
+  }
+  function dsPeakAt(d) {
+    var day = d.getUTCDay()
+    if (day === 0 || day === 6) return false
+    if (root.dsIsHolidayUTC(d)) return false
+    var m = d.getUTCHours() * 60 + d.getUTCMinutes()
+    return (m >= 60 && m < 240) || (m >= 360 && m < 600)
+  }
+  function dsPeakNow() { return root.dsPeakAt(new Date(root.nowMs)) }
+  // A UTC wall-clock time rendered in the PC's local zone (proves the
+  // "in base alla time zone del PC" requirement in the panel). atMs
+  // anchors the date AND establishes the caller's nowMs tick dependency,
+  // so the legend survives UTC-midnight rollover and DST changes.
+  function dsLocalHHMM(h, m, atMs) {
+    var n = new Date(isFinite(atMs) ? atMs : Date.now())
+    return Qt.formatTime(new Date(Date.UTC(n.getUTCFullYear(), n.getUTCMonth(), n.getUTCDate(), h, m)), "hh:mm")
+  }
+  readonly property string dsTooltipSuffix: root.dsPeakEnabled ? (root.dsPeakNow() ? " · DS peak" : " · DS off-peak") : ""
+  // Pricing-clock colors: peak = theme red; off-peak green is derived from
+  // that same red (the kit exposes no semantic green — Color has only
+  // foreground/accent/urgent/muted), keeping saturation/value/alpha and
+  // rotating the hue to green, so it follows every theme.
+  readonly property color dsPeakColor: root.urgent
+  readonly property color dsOffColor: Qt.hsva(0.33, root.urgent.hsvSaturation, root.urgent.hsvValue, root.urgent.a)
+  // Pricing-clock master switch (off by default). Pure display + fetcher
+  // flag; needs no API key. NOTE: the shell round-trips settings as STRINGS
+  // (shell.json holds 'true'/'false'), so coerce instead of === true.
+  readonly property bool dsPeakEnabled: {
+    var v = root.setting("dsPeakClock", false);
+    if (v === true || v === 1) return true;
+    var s = String(v).toLowerCase();
+    return s === "true" || s === "1";
+  }
+  // A toggle flip takes effect at the next fetch: re-fetch immediately so
+  // the holidays payload (or its absence) matches the switch without
+  // waiting for the 15-minute interval. If a fetch is already in flight
+  // (e.g. the setting arrives after the startup fetch), defer to onExited.
+  property bool dsRefetchPending: false
+  onDsPeakEnabledChanged: {
+    if (fetchProc.running) root.dsRefetchPending = true
+    else root.refresh()
+  }
+
   // Persist one inline setting. The panel closes first on purpose: every
   // setting here can resize the bar slot (Icon <-> Data, sub switches), and a
   // resize under an open panel drags the popup around and can drop it.
@@ -166,7 +219,7 @@ Panel {
   Process {
     id: fetchProc
     running: true
-    command: ["python3", root.scriptPath(), "--env", root.hermesEnvFile]
+    command: ["python3", root.scriptPath(), "--env", root.hermesEnvFile].concat(root.dsPeakEnabled ? [] : ["--no-holidays"])
     stdout: StdioCollector {
       waitForEnd: true
       // streamFinished passes no argument: `text` is the collector's own
@@ -176,6 +229,8 @@ Panel {
         try {
           var data = JSON.parse(output)
           root.providers = data.providers || []
+          root.cnHolidays = Array.isArray(data.cnHolidays) ? data.cnHolidays : []
+          root.cnHolidaysYears = Array.isArray(data.cnHolidaysYears) ? data.cnHolidaysYears : []
           root.errorText = data.error || ""
         } catch (e) {
           console.warn("hermes-usage: unparseable output:", output.slice(0, 200))
@@ -190,6 +245,10 @@ Panel {
     }
     onExited: function (code) {
       root.loading = false
+      if (root.dsRefetchPending) {
+        root.dsRefetchPending = false
+        root.refresh()
+      }
       if (code !== 0 && root.providers.length === 0) {
         root.errorText = "fetch-failed-" + code
         console.warn("hermes-usage: fetch exited with code", code)
@@ -203,12 +262,25 @@ Panel {
     visible: !root.barShowsData
     bar: root.bar
     text: "Σ"
-    tooltipText: "AI Subs"
+    tooltipText: "AI Subs" + root.dsTooltipSuffix
     active: root.errorText !== "" && root.errorText.indexOf("fetch-failed") === 0
     onPressed: function (buttonCode) {
       if (buttonCode === Qt.RightButton) root.refresh()
       else root.toggle()
     }
+  }
+
+  // DeepSeek pricing clock: always visible, needs no API key. Green =
+  // off-peak (cheap), red = peak. Overlays inside the slot, never resizes it.
+  Rectangle {
+    id: iconPeakDot
+    anchors.top: button.top
+    anchors.right: button.right
+    width: Style.space(6)
+    height: width
+    radius: width / 2
+    visible: !root.barShowsData && root.dsPeakEnabled
+    color: root.dsPeakNow() ? root.dsPeakColor : root.dsOffColor
   }
 
   // Data mode: provider logo + compact one-liner for the default sub.
@@ -237,6 +309,7 @@ Panel {
 
     implicitWidth: (chipLogo.visible ? chipLogo.width + Style.space(6) : 0)
       + (dataButton.hasWindows ? chipWindowsRow.implicitWidth : chipLabel.implicitWidth)
+      + (root.dsPeakEnabled ? chipDsLabel.implicitWidth + chipPeakDot.width + Style.space(9) : 0)
       + Style.space(17)
     implicitHeight: Math.max(chipLogo.height, dataButton.hasWindows ? chipWindowsRow.implicitHeight : chipLabel.implicitHeight)
 
@@ -362,6 +435,33 @@ Panel {
       font.pixelSize: Style.font.caption
     }
 
+    // DeepSeek pricing clock: "DS" tag + dot, always visible when enabled
+    // (needs no API key). Green = off-peak (cheap), red = peak.
+    Text {
+      id: chipDsLabel
+      anchors.left: dataButton.hasWindows ? chipWindowsRow.right : chipLabel.right
+      anchors.leftMargin: Style.space(6)
+      anchors.verticalCenter: parent.verticalCenter
+      visible: root.dsPeakEnabled
+      text: "DS"
+      textFormat: Text.PlainText
+      color: root.dim
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+    }
+
+    Rectangle {
+      id: chipPeakDot
+      anchors.left: chipDsLabel.right
+      anchors.leftMargin: Style.space(4)
+      anchors.verticalCenter: parent.verticalCenter
+      width: Style.space(5)
+      height: width
+      radius: width / 2
+      visible: root.dsPeakEnabled
+      color: root.dsPeakNow() ? root.dsPeakColor : root.dsOffColor
+    }
+
     MouseArea {
       id: dataMouse
       anchors.fill: parent
@@ -370,7 +470,7 @@ Panel {
       onClicked: function (mouse) { dataButton.triggerPress(mouse.button) }
       onContainsMouseChanged: {
         if (!root.bar) return
-        if (containsMouse) root.bar.showTooltip(dataButton, "AI Subs")
+        if (containsMouse) root.bar.showTooltip(dataButton, "AI Subs" + root.dsTooltipSuffix)
         else root.bar.hideTooltip(dataButton)
       }
       Component.onCompleted: if (root.bar && root.bar.registerClickTarget) root.bar.registerClickTarget(dataButton)
@@ -769,6 +869,106 @@ Panel {
                   label: "Data"
                   selected: root.barShowsData
                   onPicked: root.persistSetting("barDisplay", "Data")
+                }
+              }
+
+              // Pricing-clock master switch (off by default, needs no key).
+              Row {
+                width: parent.width
+                spacing: Style.space(8)
+
+                Text {
+                  anchors.verticalCenter: parent.verticalCenter
+                  width: Style.space(84)
+                  text: "Clock Deepseek"
+                  textFormat: Text.PlainText
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+
+                ModeChip {
+                  label: "Off"
+                  selected: !root.dsPeakEnabled
+                  onPicked: root.persistSetting("dsPeakClock", false)
+                }
+
+                ModeChip {
+                  label: "On"
+                  selected: root.dsPeakEnabled
+                  onPicked: root.persistSetting("dsPeakClock", true)
+                }
+              }
+
+              // Pricing-clock legend: lives inside the settings drawer, so it
+              // shows only with settings open (and only when toggled on).
+              Column {
+                id: dsClockRow
+                visible: root.dsPeakEnabled
+                width: parent.width
+                spacing: Style.space(4)
+
+                readonly property bool peak: root.dsPeakNow()
+                readonly property string localRanges: root.dsLocalHHMM(1, 0, root.nowMs) + "-" + root.dsLocalHHMM(4, 0, root.nowMs)
+                  + ", " + root.dsLocalHHMM(6, 0, root.nowMs) + "-" + root.dsLocalHHMM(10, 0, root.nowMs) + " local"
+
+                Text {
+                  width: parent.width
+                  text: "Deepseek peak/off times - now " + (dsClockRow.peak ? "PEAK" : "OFF-PEAK")
+                  textFormat: Text.PlainText
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  font.bold: true
+                  wrapMode: Text.WordWrap
+                }
+
+                Row {
+                  width: parent.width
+                  spacing: Style.space(6)
+
+                  Rectangle {
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: Style.space(7)
+                    height: width
+                    radius: width / 2
+                    color: root.dsPeakColor
+                  }
+
+                  Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: parent.width - Style.space(7) - parent.spacing
+                    text: "peak  Mon-Fri 01:00-04:00, 06:00-10:00 UTC (" + dsClockRow.localRanges + ")"
+                    textFormat: Text.PlainText
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    wrapMode: Text.WordWrap
+                  }
+                }
+
+                Row {
+                  width: parent.width
+                  spacing: Style.space(6)
+
+                  Rectangle {
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: Style.space(7)
+                    height: width
+                    radius: width / 2
+                    color: root.dsOffColor
+                  }
+
+                  Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: parent.width - Style.space(7) - parent.spacing
+                    text: "off-peak  all other times, weekends, CN holidays"
+                    textFormat: Text.PlainText
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    wrapMode: Text.WordWrap
+                  }
                 }
               }
 
