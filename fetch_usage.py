@@ -73,6 +73,16 @@ CURSOR_USAGE_URL = "https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurre
 COPILOT_EDITOR_VERSION = "OmarchyUsageMonitor/1.0"
 COPILOT_INTEGRATION_ID = "omarchy-ai-subs"
 
+# Chinese public holidays (DeepSeek peak/off-peak logic): free Nager.Date API,
+# no key. %d is always an int year derived from the UTC clock, never input.
+NAGER_HOLIDAYS_URL = "https://date.nager.at/api/v3/PublicHolidays/%d/CN"
+HOLIDAY_CACHE_FILE = "~/.local/state/omarchy/ai-subs/cn-holidays.json"
+HOLIDAY_TTL_SEC = 7 * 86400
+HOLIDAY_RETRY_SEC = 3600
+HOLIDAY_MAX_ENTRIES = 50
+HOLIDAY_MAX_BYTES = 65536
+_HOLIDAY_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}\Z")
+
 TIMEOUT_SECONDS = 15
 MAX_RESPONSE_BYTES = 4096
 USER_AGENT = "Mozilla/5.0 (Hermes-Agent; usage-stats)"
@@ -581,6 +591,117 @@ def _request_json(url: str, api_key: str):
 
 def _request_usage(api_key: str):
     return _request_json(USAGE_API_URL, api_key)
+
+
+def _request_public_json(url: str):
+    # Unauthenticated GET for public calendars (Nager.Date): same TLS context
+    # and same-origin redirect policy as the vendor calls, but deliberately no
+    # Authorization header — there is no secret to send.
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/json",
+            "User-Agent": USER_AGENT,
+        },
+    )
+    with _OPENER.open(request, timeout=TIMEOUT_SECONDS) as response:
+        raw = response.read(HOLIDAY_MAX_BYTES + 1)
+        if len(raw) > HOLIDAY_MAX_BYTES:
+            raise ValueError("response-too-large")
+    return json.loads(raw.decode("utf-8", errors="replace"))
+
+
+def _valid_holiday_dates(body, year: int):
+    # Strict shape: a list of {"date": "YYYY-MM-DD", ...} entries in *year*.
+    # Anything else (garbage, wrong types, oversized list, impossible dates)
+    # returns None and the old cache is kept.
+    if not isinstance(body, list) or len(body) > HOLIDAY_MAX_ENTRIES:
+        return None
+    days = []
+    for entry in body:
+        if not isinstance(entry, dict):
+            return None
+        day = entry.get("date")
+        if not isinstance(day, str) or not _HOLIDAY_DATE_RE.match(day):
+            return None
+        try:
+            y, m, d = int(day[0:4]), int(day[5:7]), int(day[8:10])
+            datetime.date(y, m, d)
+        except ValueError:
+            return None
+        if y != year:
+            return None
+        days.append(day)
+    return sorted(set(days))
+
+
+def _merge_holiday_days(cached, years):
+    days = sorted({
+        d for y in years
+        for d in cached.get("days", {}).get(str(y), [])
+        if isinstance(d, str)
+    })
+    return days, [str(y) for y in years]
+
+
+def _load_cn_holidays():
+    """Chinese public-holiday dates (UTC YYYY-MM-DD) for DeepSeek peak logic.
+
+    Fetched from the free Nager.Date API at most once per HOLIDAY_TTL_SEC and
+    cached under ~/.local/state (our own state file, not a credential — plain
+    write, best-effort). A failed fetch retries at most hourly so an offline
+    machine never blocks every 15-minute run on timeouts. Any failure yields
+    the stale cache or ([], []), and the QML falls back to the weekday/weekend
+    rule — holidays only ever flip peak to off-peak, never the reverse.
+    """
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    years = [now_utc.year]
+    if now_utc.month == 12:
+        years.append(now_utc.year + 1)  # prefetch January's answers early
+    cache_path = _expand_home(HOLIDAY_CACHE_FILE)
+    cached = {"fetchedAt": 0, "attemptedAt": 0, "days": {}}
+    try:
+        with open(cache_path, "r", encoding="utf-8") as handle:
+            loaded = json.load(handle)
+        if isinstance(loaded, dict) and isinstance(loaded.get("days"), dict):
+            cached = loaded
+    except (OSError, ValueError):
+        pass
+    for stamp in ("fetchedAt", "attemptedAt"):
+        try:
+            cached[stamp] = float(cached.get(stamp, 0))
+        except (TypeError, ValueError):
+            cached[stamp] = 0.0
+    missing = [y for y in years if not isinstance(cached["days"].get(str(y)), list)]
+    if not missing and time.time() - cached["fetchedAt"] < HOLIDAY_TTL_SEC:
+        return _merge_holiday_days(cached, years)
+    if time.time() - cached["attemptedAt"] < HOLIDAY_RETRY_SEC:
+        return _merge_holiday_days(cached, years)
+    cached["attemptedAt"] = int(time.time())
+    refreshed = False
+    for year in missing or years:
+        try:
+            body = _request_public_json(NAGER_HOLIDAYS_URL % year)
+        except Exception:  # noqa: BLE001 - holidays are best-effort
+            continue
+        valid = _valid_holiday_dates(body, year)
+        if valid is None:
+            continue
+        cached["days"][str(year)] = valid
+        refreshed = True
+    if refreshed:
+        cached["fetchedAt"] = int(time.time())
+    try:
+        parent = os.path.dirname(cache_path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        tmp_path = cache_path + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            json.dump(cached, handle)
+        os.replace(tmp_path, cache_path)
+    except OSError:
+        pass  # cache write is best-effort; the in-memory days still ship
+    return _merge_holiday_days(cached, years)
 
 
 def _normalize_usage(body):
@@ -1330,8 +1451,10 @@ def main() -> None:
             results[rec["id"]] = rec
 
     providers = [results[spec["id"]] for spec in PROVIDER_SPECS]
+    holiday_days, holiday_years = _load_cn_holidays()
     print(json.dumps(
-        {"providers": providers, "generatedAt": int(time.time())},
+        {"providers": providers, "generatedAt": int(time.time()),
+         "cnHolidays": holiday_days, "cnHolidaysYears": holiday_years},
         ensure_ascii=False,
     ))
 

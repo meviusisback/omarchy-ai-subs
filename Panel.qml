@@ -27,6 +27,8 @@ Panel {
   readonly property color track: Style.selectedFillFor(foreground, Color.accent)
 
   property var providers: []
+  property var cnHolidays: []
+  property var cnHolidaysYears: []
   property bool loading: true
   property string errorText: ""
   property bool settingsOpen: false
@@ -114,6 +116,44 @@ Panel {
     return Math.max(1, minutes) + "m"
   }
 
+  // DeepSeek peak/off-peak pricing (UTC): peak Mon-Fri 01:00-04:00 and
+  // 06:00-10:00; off-peak the other 17 weekday hours, all of Sat/Sun and
+  // every Chinese public holiday (full UTC days from Nager.Date, see
+  // fetch_usage.py _load_cn_holidays). Pure UTC clock math — no timezone
+  // offsets, DST-immune. Holidays only flip peak to off, never the reverse.
+  function dsId(p) { return String((p && p.id) || "").toLowerCase() }
+  function dsIsHolidayUTC(d) {
+    var key = d.getUTCFullYear() + "-" + ("0" + (d.getUTCMonth() + 1)).slice(-2) + "-" + ("0" + d.getUTCDate()).slice(-2)
+    return (root.cnHolidays || []).indexOf(key) !== -1
+  }
+  function dsPeakAt(d) {
+    var day = d.getUTCDay()
+    if (day === 0 || day === 6) return false
+    if (root.dsIsHolidayUTC(d)) return false
+    var m = d.getUTCHours() * 60 + d.getUTCMinutes()
+    return (m >= 60 && m < 240) || (m >= 360 && m < 600)
+  }
+  function dsPeakNow() { return root.dsPeakAt(new Date(root.nowMs)) }
+  // Minutes until the next peak<->off-peak flip, stepping forward at 1-minute
+  // granularity (cap 7 days, so long holiday stretches still resolve).
+  function dsNextSwitchMs() {
+    var base = Math.floor(root.nowMs / 60000) * 60000
+    var cur = root.dsPeakAt(new Date(base))
+    for (var i = 1; i <= 10080; i++) {
+      var d = new Date(base + i * 60000)
+      if (root.dsPeakAt(d) !== cur) return d.getTime() - root.nowMs
+    }
+    return -1
+  }
+  // A UTC wall-clock time rendered in the PC's local zone (proves the
+  // "in base alla time zone del PC" requirement in the panel).
+  function dsLocalHHMM(h, m) {
+    var n = new Date()
+    return Qt.formatTime(new Date(Date.UTC(n.getUTCFullYear(), n.getUTCMonth(), n.getUTCDate(), h, m)), "hh:mm")
+  }
+  readonly property bool dsConfigured: (root.providers || []).filter(function (p) { return root.dsId(p) === "deepseek" && p && p.configured; }).length > 0
+  readonly property string dsTooltipSuffix: root.dsConfigured ? (root.dsPeakNow() ? " · DS peak" : " · DS off-peak") : ""
+
   // Persist one inline setting. The panel closes first on purpose: every
   // setting here can resize the bar slot (Icon <-> Data, sub switches), and a
   // resize under an open panel drags the popup around and can drop it.
@@ -176,6 +216,8 @@ Panel {
         try {
           var data = JSON.parse(output)
           root.providers = data.providers || []
+          root.cnHolidays = Array.isArray(data.cnHolidays) ? data.cnHolidays : []
+          root.cnHolidaysYears = Array.isArray(data.cnHolidaysYears) ? data.cnHolidaysYears : []
           root.errorText = data.error || ""
         } catch (e) {
           console.warn("hermes-usage: unparseable output:", output.slice(0, 200))
@@ -203,12 +245,26 @@ Panel {
     visible: !root.barShowsData
     bar: root.bar
     text: "Σ"
-    tooltipText: "AI Subs"
+    tooltipText: "AI Subs" + root.dsTooltipSuffix
     active: root.errorText !== "" && root.errorText.indexOf("fetch-failed") === 0
     onPressed: function (buttonCode) {
       if (buttonCode === Qt.RightButton) root.refresh()
       else root.toggle()
     }
+  }
+
+  // DeepSeek peak dot for Icon mode: 6px badge in the slot's top-right
+  // corner, only when a DeepSeek sub is configured. Accent = off-peak
+  // (cheap), dim = peak. Overlays inside the slot, never resizes it.
+  Rectangle {
+    id: iconPeakDot
+    anchors.top: button.top
+    anchors.right: button.right
+    width: Style.space(6)
+    height: width
+    radius: width / 2
+    visible: !root.barShowsData && root.dsConfigured
+    color: root.dsPeakNow() ? root.dim : Color.accent
   }
 
   // Data mode: provider logo + compact one-liner for the default sub.
@@ -237,6 +293,7 @@ Panel {
 
     implicitWidth: (chipLogo.visible ? chipLogo.width + Style.space(6) : 0)
       + (dataButton.hasWindows ? chipWindowsRow.implicitWidth : chipLabel.implicitWidth)
+      + (chipPeakDot.visible ? chipPeakDot.width + Style.space(5) : 0)
       + Style.space(17)
     implicitHeight: Math.max(chipLogo.height, dataButton.hasWindows ? chipWindowsRow.implicitHeight : chipLabel.implicitHeight)
 
@@ -362,6 +419,20 @@ Panel {
       font.pixelSize: Style.font.caption
     }
 
+    // DeepSeek peak dot: 5px, only when the shown sub is DeepSeek.
+    // Accent = off-peak (cheap), dim = peak.
+    Rectangle {
+      id: chipPeakDot
+      anchors.left: chipLabel.right
+      anchors.leftMargin: Style.space(5)
+      anchors.verticalCenter: parent.verticalCenter
+      width: Style.space(5)
+      height: width
+      radius: width / 2
+      visible: root.dsId(dataButton.sub) === "deepseek" && dataButton.sub && dataButton.sub.configured
+      color: root.dsPeakNow() ? root.dim : Color.accent
+    }
+
     MouseArea {
       id: dataMouse
       anchors.fill: parent
@@ -370,7 +441,7 @@ Panel {
       onClicked: function (mouse) { dataButton.triggerPress(mouse.button) }
       onContainsMouseChanged: {
         if (!root.bar) return
-        if (containsMouse) root.bar.showTooltip(dataButton, "AI Subs")
+        if (containsMouse) root.bar.showTooltip(dataButton, "AI Subs" + root.dsTooltipSuffix)
         else root.bar.hideTooltip(dataButton)
       }
       Component.onCompleted: if (root.bar && root.bar.registerClickTarget) root.bar.registerClickTarget(dataButton)
@@ -549,6 +620,46 @@ Panel {
         font.family: root.fontFamily
         font.pixelSize: Style.font.subtitle
         font.bold: true
+      }
+    }
+
+    // DeepSeek peak/off-peak detail row: full windows in UTC plus the PC-local
+    // equivalents, live countdown to the next flip, holiday-source note.
+    // ASCII-only strings on purpose (byte-exact rule for UI files).
+    Row {
+      visible: root.dsId(block.p) === "deepseek"
+      width: parent.width
+      spacing: Style.space(6)
+
+      readonly property bool peak: root.dsPeakNow()
+      readonly property string flipIn: root.formatDuration(root.dsNextSwitchMs())
+      readonly property string holidayNote: root.cnHolidaysYears.length > 0
+        ? "festivi CN " + root.cnHolidaysYears.join("/") + " inclusi"
+        : "festivi CN n/d (offline?)"
+
+      Rectangle {
+        anchors.verticalCenter: parent.verticalCenter
+        width: Style.space(7)
+        height: width
+        radius: width / 2
+        color: parent.peak ? root.dim : Color.accent
+      }
+
+      Text {
+        anchors.verticalCenter: parent.verticalCenter
+        width: parent.width - Style.space(7) - parent.spacing
+        text: (parent.peak
+          ? "PEAK - tariffa piena - off-peak tra " + parent.flipIn
+          : "OFF-PEAK - tariffe ridotte - peak tra " + parent.flipIn)
+          + "\nPeak lun-ven 01:00-04:00 e 06:00-10:00 UTC ("
+          + root.dsLocalHHMM(1, 0) + "-" + root.dsLocalHHMM(4, 0)
+          + " e " + root.dsLocalHHMM(6, 0) + "-" + root.dsLocalHHMM(10, 0)
+          + " locali) - " + parent.holidayNote
+        textFormat: Text.PlainText
+        color: parent.peak ? root.dim : root.foreground
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        wrapMode: Text.WordWrap
       }
     }
 
