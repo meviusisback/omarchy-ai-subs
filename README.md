@@ -27,10 +27,12 @@ OC · 5h 0% [──] (4h) · W 79% [━━──] (2d) · M 46% [━───] (
   `omarchy bar set` works too).
 - **DeepSeek peak/off-peak indicator** — a discreet pricing-clock tag in
   the bar (`DS` + dot, theme colors: red = peak, green = off-peak; needs
-  no API key) plus a two-line legend in the panel (`Deepseek peak/off
-  times` with live state, peak windows in UTC and PC-local equivalents,
-  off-peak coverage). Peak Mon–Fri 01:00–04:00 and 06:00–10:00 UTC;
-  off-peak the other 17 weekday hours, weekends and Chinese public holidays.
+  no API key) plus a two-line legend inside the panel settings
+  (`Deepseek peak/off times` with live state, peak windows in UTC and
+  PC-local equivalents, off-peak coverage). Peak Mon–Fri 01:00–04:00
+  and 06:00–10:00 UTC; off-peak the other 17 weekday hours, weekends
+  and Chinese public holidays. Off by default — toggle `Clock Deepseek`
+  in the settings drawer.
 
 ## Supported providers
 
@@ -41,7 +43,7 @@ OC · 5h 0% [──] (4h) · W 79% [━━──] (2d) · M 46% [━───] (
 | `CL` | Claude Code | % used per limit window + resets | none — reads Omarchy agent usage records |
 | `CX` | Codex | % used per limit window + resets | none — reads Omarchy agent usage records |
 | `CC` | Command Code | % used (5h / week / month) + USD balance remaining | `COMMANDCODE_API_KEY` |
-| `DS` | DeepSeek | USD balance + peak/off-peak dot | `DEEPSEEK_API_KEY` (or `~/.deepseek/config.toml`) |
+| `DS` | DeepSeek | USD balance (key) + pricing clock (no key) | `DEEPSEEK_API_KEY` (or `~/.deepseek/config.toml`) |
 | `KI` | Kimi / Moonshot | USD balance | `KIMI_API_KEY` (or `~/.kimi-code/config.toml`) |
 | `NV` | NovitaAI | USD balance | `NOVITA_API_KEY` |
 | `Z` | ZAI / Zhipu | CNY balance | `ZAI_API_KEY` |
@@ -143,6 +145,8 @@ Click the bar icon to open the panel:
 - **Bar** — `Icon` (Sigma glyph) or `Data` (compact one-liner for the default
   sub, e.g. `OC · 5h 0% (4h) · W 79% (2d) · M 46% (16d)`).
 - **Sub** — which provider Data mode shows (only configured ones are listed).
+- **Clock Deepseek** — Off/On switch for the DeepSeek peak/off-peak
+  pricing clock (bar `DS` dot + settings legend). Off by default.
 
 Equivalent CLI:
 
@@ -150,6 +154,7 @@ Equivalent CLI:
 omarchy bar set meviusisback.ai-subs barDisplay Data
 omarchy bar set meviusisback.ai-subs defaultSub openrouter
 omarchy bar set meviusisback.ai-subs refreshIntervalSec 300
+omarchy bar set meviusisback.ai-subs dsPeakClock true
 ```
 
 ## How it works
@@ -165,7 +170,10 @@ usage/balance endpoint in parallel and prints one JSON document; the QML panel
 4. Omarchy collector records (`~/.local/state/omarchy/agents/usage/`) for Claude and Codex
 
 No data leaves your machine except the vendor API calls authenticated with your
-own credentials.
+own credentials — plus one unauthenticated public-calendar request: the free
+Nager.Date API (`PublicHolidays/{year}/CN`, no key, no personal data) is
+queried at most once a week to date Chinese public holidays, only while the
+pricing clock is enabled (disable it and the request is never made).
 
 ## License
 
