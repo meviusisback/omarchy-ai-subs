@@ -91,5 +91,27 @@ class TestMergeHolidayDays(unittest.TestCase):
         self.assertEqual(years, ["2026"])
 
 
+class TestNoHolidaysFlag(unittest.TestCase):
+    """--no-holidays emits empty holiday lists with no network call."""
+
+    def test_no_holidays_skips_fetch(self):
+        import io
+        import sys
+        from unittest import mock
+        argv = ["fetch_usage.py", "--env", "/dev/null", "--no-holidays"]
+        with mock.patch.object(sys, "argv", argv):
+            with mock.patch.object(
+                fetch_usage, "_load_cn_holidays",
+                side_effect=AssertionError("must not be called"),
+            ):
+                captured = io.StringIO()
+                with mock.patch.object(sys, "stdout", captured):
+                    fetch_usage.main()
+        doc = __import__("json").loads(captured.getvalue())
+        self.assertEqual(doc["cnHolidays"], [])
+        self.assertEqual(doc["cnHolidaysYears"], [])
+        self.assertEqual(len(doc["providers"]), len(fetch_usage.PROVIDER_SPECS))
+
+
 if __name__ == "__main__":
     unittest.main()

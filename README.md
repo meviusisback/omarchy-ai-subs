@@ -25,11 +25,12 @@ OC · 5h 0% [──] (4h) · W 79% [━━──] (2d) · M 46% [━───] (
 - **Settings live in the panel** — Bar Icon/Data toggle and default-sub
   selector as segmented chips; no config files to hand-edit (but
   `omarchy bar set` works too).
-- **DeepSeek peak/off-peak indicator** — a discreet dot in the bar (accent
-  = cheap off-peak, dim = peak) plus the full windows in the panel:
-  peak Mon–Fri 01:00–04:00 and 06:00–10:00 UTC, off-peak the other
-  17 weekday hours, weekends and Chinese public holidays, with a live
-  countdown to the next flip and PC-local equivalents.
+- **DeepSeek peak/off-peak indicator** — a discreet pricing-clock dot,
+  always in the bar (accent = cheap off-peak, dim = peak; needs no API
+  key) plus the full windows in the panel: peak Mon–Fri 01:00–04:00
+  and 06:00–10:00 UTC, off-peak the other 17 weekday hours, weekends
+  and Chinese public holidays, with a live countdown to the next flip
+  and PC-local equivalents.
 
 ## Supported providers
 
@@ -65,6 +66,11 @@ under `~/.local/state/omarchy/ai-subs/` — offline, the widget falls back to
 the weekday/weekend rule. Nager.Date lists each holiday once (single day),
 so multi-day weeks are covered on the named day only; the panel errs toward
 "peak" rather than claiming a discount that is not there.
+
+The clock is **off by default**: toggle it from the panel settings (gear →
+`Clock` Off/On) or via `omarchy bar set meviusisback.ai-subs dsPeakClock true`.
+When off, the bar dot and panel row are hidden and the fetcher skips the
+holiday request entirely (`--no-holidays`).
 
 Copilot and Cursor are **opt-in OAuth providers** (Tier 2): they read tokens
 from the agent's own credential store and use them read-use-discard (never

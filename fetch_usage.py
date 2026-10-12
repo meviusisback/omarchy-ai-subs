@@ -1384,6 +1384,10 @@ def main() -> None:
                              "keys. Must live inside the Hermes profile directory "
                              "($HERMES_HOME — when it is inside your home — or "
                              "~/.hermes), or it is refused.")
+    parser.add_argument("--no-holidays", action="store_true",
+                        help="Skip the Nager.Date Chinese-holiday fetch (pricing "
+                             "clock disabled in the panel): emit empty holiday "
+                             "lists with no network call.")
     args = parser.parse_args()
 
     load_hermes_dotenv(args.env)
@@ -1454,7 +1458,10 @@ def main() -> None:
             results[rec["id"]] = rec
 
     providers = [results[spec["id"]] for spec in PROVIDER_SPECS]
-    holiday_days, holiday_years = _load_cn_holidays()
+    if args.no_holidays:
+        holiday_days, holiday_years = [], []
+    else:
+        holiday_days, holiday_years = _load_cn_holidays()
     print(json.dumps(
         {"providers": providers, "generatedAt": int(time.time()),
          "cnHolidays": holiday_days, "cnHolidaysYears": holiday_years},
