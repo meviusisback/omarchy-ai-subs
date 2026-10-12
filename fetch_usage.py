@@ -20,6 +20,8 @@ Provider mapping (display -> vendor -> metric):
   CL Claude Code      collector-backed
   CX Codex            collector-backed
   DS DeepSeek         USD balance (env var or native config fallback)
+                      + UTC peak/off-peak flag (CN holidays via Nager.Date,
+                      7-day disk cache, fail-open)
   KI Kimi/Moonshot    CNY balance (env var or native config fallback)
   NV NovitaAI         USD balance
   Z  ZAI/Zhipu        CNY balance
@@ -636,9 +638,10 @@ def _valid_holiday_dates(body, year: int):
 
 
 def _merge_holiday_days(cached, years):
+    stored = cached.get("days", {})
     days = sorted({
         d for y in years
-        for d in cached.get("days", {}).get(str(y), [])
+        for d in (stored.get(str(y), []) if isinstance(stored.get(str(y)), list) else [])
         if isinstance(d, str)
     })
     return days, [str(y) for y in years]

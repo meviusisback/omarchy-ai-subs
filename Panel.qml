@@ -145,6 +145,9 @@ Panel {
     }
     return -1
   }
+  // Display label for the next flip: countdown, or 7d+ when the next flip
+  // is beyond the 7-day stepping cap (long holiday stretches).
+  function dsFlipLabel() { var ms = root.dsNextSwitchMs(); return ms > 0 ? root.formatDuration(ms) : "7d+" }
   // A UTC wall-clock time rendered in the PC's local zone (proves the
   // "in base alla time zone del PC" requirement in the panel).
   function dsLocalHHMM(h, m) {
@@ -429,7 +432,7 @@ Panel {
       width: Style.space(5)
       height: width
       radius: width / 2
-      visible: root.dsId(dataButton.sub) === "deepseek" && dataButton.sub && dataButton.sub.configured
+      visible: !dataButton.hasWindows && root.dsId(dataButton.sub) === "deepseek" && dataButton.sub && dataButton.sub.configured
       color: root.dsPeakNow() ? root.dim : Color.accent
     }
 
@@ -632,8 +635,11 @@ Panel {
       spacing: Style.space(6)
 
       readonly property bool peak: root.dsPeakNow()
-      readonly property string flipIn: root.formatDuration(root.dsNextSwitchMs())
-      readonly property string holidayNote: root.cnHolidaysYears.length > 0
+      // Gated on the row's own visibility so the minute-stepping loop only
+      // runs when a DeepSeek block is actually shown.
+      readonly property bool isDs: root.dsId(block.p) === "deepseek"
+      readonly property string flipIn: isDs ? root.dsFlipLabel() : ""
+      readonly property string holidayNote: root.cnHolidays.length > 0 && root.cnHolidaysYears.length > 0
         ? "festivi CN " + root.cnHolidaysYears.join("/") + " inclusi"
         : "festivi CN n/d (offline?)"
 

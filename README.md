@@ -25,6 +25,11 @@ OC · 5h 0% [──] (4h) · W 79% [━━──] (2d) · M 46% [━───] (
 - **Settings live in the panel** — Bar Icon/Data toggle and default-sub
   selector as segmented chips; no config files to hand-edit (but
   `omarchy bar set` works too).
+- **DeepSeek peak/off-peak indicator** — a discreet dot in the bar (accent
+  = cheap off-peak, dim = peak) plus the full windows in the panel:
+  peak Mon–Fri 01:00–04:00 and 06:00–10:00 UTC, off-peak the other
+  17 weekday hours, weekends and Chinese public holidays, with a live
+  countdown to the next flip and PC-local equivalents.
 
 ## Supported providers
 
@@ -35,7 +40,7 @@ OC · 5h 0% [──] (4h) · W 79% [━━──] (2d) · M 46% [━───] (
 | `CL` | Claude Code | % used per limit window + resets | none — reads Omarchy agent usage records |
 | `CX` | Codex | % used per limit window + resets | none — reads Omarchy agent usage records |
 | `CC` | Command Code | % used (5h / week / month) + USD balance remaining | `COMMANDCODE_API_KEY` |
-| `DS` | DeepSeek | USD balance | `DEEPSEEK_API_KEY` (or `~/.deepseek/config.toml`) |
+| `DS` | DeepSeek | USD balance + peak/off-peak dot | `DEEPSEEK_API_KEY` (or `~/.deepseek/config.toml`) |
 | `KI` | Kimi / Moonshot | USD balance | `KIMI_API_KEY` (or `~/.kimi-code/config.toml`) |
 | `NV` | NovitaAI | USD balance | `NOVITA_API_KEY` |
 | `Z` | ZAI / Zhipu | CNY balance | `ZAI_API_KEY` |
@@ -51,6 +56,15 @@ their limits appear automatically.
 
 DeepSeek and Kimi fall back to their native config files (`~/.deepseek/config.toml`
 and `~/.kimi-code/config.toml`) when the env var is not set.
+
+DeepSeek peak/off-peak hours are evaluated in UTC from the PC clock (peak
+Mon–Fri 01:00–04:00 and 06:00–10:00; DST-immune, no conversion math).
+Chinese public holidays come from the free Nager.Date API
+(`PublicHolidays/{year}/CN`, no key), fetched at most once a week and cached
+under `~/.local/state/omarchy/ai-subs/` — offline, the widget falls back to
+the weekday/weekend rule. Nager.Date lists each holiday once (single day),
+so multi-day weeks are covered on the named day only; the panel errs toward
+"peak" rather than claiming a discount that is not there.
 
 Copilot and Cursor are **opt-in OAuth providers** (Tier 2): they read tokens
 from the agent's own credential store and use them read-use-discard (never
