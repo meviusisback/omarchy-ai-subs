@@ -896,6 +896,78 @@ Panel {
                 }
               }
 
+              // Pricing-clock legend: lives inside the settings drawer, so it
+              // shows only with settings open (and only when toggled on).
+              Column {
+                id: dsClockRow
+                visible: root.dsPeakEnabled
+                width: parent.width
+                spacing: Style.space(4)
+
+                readonly property bool peak: root.dsPeakNow()
+                readonly property string localRanges: root.dsLocalHHMM(1, 0) + "-" + root.dsLocalHHMM(4, 0)
+                  + ", " + root.dsLocalHHMM(6, 0) + "-" + root.dsLocalHHMM(10, 0) + " local"
+
+                Text {
+                  width: parent.width
+                  text: "Deepseek peak/off times - now " + (dsClockRow.peak ? "PEAK" : "OFF-PEAK")
+                  textFormat: Text.PlainText
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  font.bold: true
+                  wrapMode: Text.WordWrap
+                }
+
+                Row {
+                  width: parent.width
+                  spacing: Style.space(6)
+
+                  Rectangle {
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: Style.space(7)
+                    height: width
+                    radius: width / 2
+                    color: root.dsPeakColor
+                  }
+
+                  Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: parent.width - Style.space(7) - parent.spacing
+                    text: "peak  Mon-Fri 01:00-04:00, 06:00-10:00 UTC (" + dsClockRow.localRanges + ")"
+                    textFormat: Text.PlainText
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    wrapMode: Text.WordWrap
+                  }
+                }
+
+                Row {
+                  width: parent.width
+                  spacing: Style.space(6)
+
+                  Rectangle {
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: Style.space(7)
+                    height: width
+                    radius: width / 2
+                    color: root.dsOffColor
+                  }
+
+                  Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: parent.width - Style.space(7) - parent.spacing
+                    text: "off-peak  all other times, weekends, CN holidays"
+                    textFormat: Text.PlainText
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    wrapMode: Text.WordWrap
+                  }
+                }
+              }
+
               Row {
                 visible: root.barShowsData && root.configuredCount > 0
                 width: parent.width
@@ -927,78 +999,6 @@ Panel {
                     }
                   }
                 }
-              }
-            }
-          }
-
-          // DeepSeek pricing clock legend: both colors explained, live state
-          // in the title. ASCII-only strings on purpose.
-          Column {
-            id: dsClockRow
-            visible: root.dsPeakEnabled
-            width: parent.width
-            spacing: Style.space(4)
-
-            readonly property bool peak: root.dsPeakNow()
-            readonly property string localRanges: root.dsLocalHHMM(1, 0) + "-" + root.dsLocalHHMM(4, 0)
-              + ", " + root.dsLocalHHMM(6, 0) + "-" + root.dsLocalHHMM(10, 0) + " local"
-
-            Text {
-              width: parent.width
-              text: "Deepseek peak/off times - now " + (dsClockRow.peak ? "PEAK" : "OFF-PEAK")
-              textFormat: Text.PlainText
-              color: root.foreground
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-              font.bold: true
-              wrapMode: Text.WordWrap
-            }
-
-            Row {
-              width: parent.width
-              spacing: Style.space(6)
-
-              Rectangle {
-                anchors.verticalCenter: parent.verticalCenter
-                width: Style.space(7)
-                height: width
-                radius: width / 2
-                color: root.dsPeakColor
-              }
-
-              Text {
-                anchors.verticalCenter: parent.verticalCenter
-                width: parent.width - Style.space(7) - parent.spacing
-                text: "peak  Mon-Fri 01:00-04:00, 06:00-10:00 UTC (" + dsClockRow.localRanges + ")"
-                textFormat: Text.PlainText
-                color: root.foreground
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
-                wrapMode: Text.WordWrap
-              }
-            }
-
-            Row {
-              width: parent.width
-              spacing: Style.space(6)
-
-              Rectangle {
-                anchors.verticalCenter: parent.verticalCenter
-                width: Style.space(7)
-                height: width
-                radius: width / 2
-                color: root.dsOffColor
-              }
-
-              Text {
-                anchors.verticalCenter: parent.verticalCenter
-                width: parent.width - Style.space(7) - parent.spacing
-                text: "off-peak  all other times, weekends, CN holidays"
-                textFormat: Text.PlainText
-                color: root.foreground
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
-                wrapMode: Text.WordWrap
               }
             }
           }
