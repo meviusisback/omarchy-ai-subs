@@ -133,28 +133,6 @@ Panel {
     return (m >= 60 && m < 240) || (m >= 360 && m < 600)
   }
   function dsPeakNow() { return root.dsPeakAt(new Date(root.nowMs)) }
-  // Minutes until the next peak<->off-peak flip, stepping forward at 1-minute
-  // granularity (cap 7 days, so long holiday stretches still resolve).
-  function dsNextSwitchMs() {
-    var base = Math.floor(root.nowMs / 60000) * 60000
-    var cur = root.dsPeakAt(new Date(base))
-    for (var i = 1; i <= 10080; i++) {
-      var d = new Date(base + i * 60000)
-      if (root.dsPeakAt(d) !== cur) return d.getTime() - root.nowMs
-    }
-    return -1
-  }
-  // Display label for the next flip, memoized per minute bucket so the
-  // minute-stepping loop runs at most once a minute, not every second.
-  property var dsFlipCache: ({bucket: -1, label: ""})
-  function dsFlipLabel() {
-    var bucket = Math.floor(root.nowMs / 60000)
-    if (root.dsFlipCache.bucket !== bucket) {
-      var ms = root.dsNextSwitchMs()
-      root.dsFlipCache = {bucket: bucket, label: ms > 0 ? root.formatDuration(ms) : "7d+"}
-    }
-    return root.dsFlipCache.label
-  }
   // A UTC wall-clock time rendered in the PC's local zone (proves the
   // "in base alla time zone del PC" requirement in the panel).
   function dsLocalHHMM(h, m) {
@@ -162,6 +140,11 @@ Panel {
     return Qt.formatTime(new Date(Date.UTC(n.getUTCFullYear(), n.getUTCMonth(), n.getUTCDate(), h, m)), "hh:mm")
   }
   readonly property string dsTooltipSuffix: root.dsPeakEnabled ? (root.dsPeakNow() ? " · DS peak" : " · DS off-peak") : ""
+  // Pricing-clock colors: peak = theme red, off-peak = fixed green (the kit
+  // exposes no semantic green — Color has foreground/accent/urgent/muted
+  // only; this constant stays readable on dark bars).
+  readonly property color dsPeakColor: root.urgent
+  readonly property color dsOffColor: "#6a9955"
   // Pricing-clock master switch (off by default). Pure display + fetcher
   // flag; needs no API key. NOTE: the shell round-trips settings as STRINGS
   // (shell.json holds 'true'/'false'), so coerce instead of === true.
@@ -282,8 +265,8 @@ Panel {
     }
   }
 
-  // DeepSeek pricing clock: always visible, needs no API key. Accent =
-  // off-peak (cheap), dim = peak. Overlays inside the slot, never resizes it.
+  // DeepSeek pricing clock: always visible, needs no API key. Green =
+  // off-peak (cheap), red = peak. Overlays inside the slot, never resizes it.
   Rectangle {
     id: iconPeakDot
     anchors.top: button.top
@@ -292,7 +275,7 @@ Panel {
     height: width
     radius: width / 2
     visible: !root.barShowsData && root.dsPeakEnabled
-    color: root.dsPeakNow() ? root.dim : Color.accent
+    color: root.dsPeakNow() ? root.dsPeakColor : root.dsOffColor
   }
 
   // Data mode: provider logo + compact one-liner for the default sub.
@@ -321,7 +304,7 @@ Panel {
 
     implicitWidth: (chipLogo.visible ? chipLogo.width + Style.space(6) : 0)
       + (dataButton.hasWindows ? chipWindowsRow.implicitWidth : chipLabel.implicitWidth)
-      + (chipPeakDot.visible ? chipPeakDot.width + Style.space(5) : 0)
+      + (root.dsPeakEnabled ? chipDsLabel.implicitWidth + chipPeakDot.width + Style.space(9) : 0)
       + Style.space(17)
     implicitHeight: Math.max(chipLogo.height, dataButton.hasWindows ? chipWindowsRow.implicitHeight : chipLabel.implicitHeight)
 
@@ -447,19 +430,31 @@ Panel {
       font.pixelSize: Style.font.caption
     }
 
-    // DeepSeek pricing-clock dot: 5px, always visible (needs no API key).
-    // Accent = off-peak (cheap), dim = peak. Meaning disambiguated by the
-    // button tooltip ("AI Subs · DS peak/off-peak").
+    // DeepSeek pricing clock: "DS" tag + dot, always visible when enabled
+    // (needs no API key). Green = off-peak (cheap), red = peak.
+    Text {
+      id: chipDsLabel
+      anchors.left: dataButton.hasWindows ? chipWindowsRow.right : chipLabel.right
+      anchors.leftMargin: Style.space(6)
+      anchors.verticalCenter: parent.verticalCenter
+      visible: root.dsPeakEnabled
+      text: "DS"
+      textFormat: Text.PlainText
+      color: root.dim
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+    }
+
     Rectangle {
       id: chipPeakDot
-      anchors.left: dataButton.hasWindows ? chipWindowsRow.right : chipLabel.right
-      anchors.leftMargin: Style.space(5)
+      anchors.left: chipDsLabel.right
+      anchors.leftMargin: Style.space(4)
       anchors.verticalCenter: parent.verticalCenter
       width: Style.space(5)
       height: width
       radius: width / 2
       visible: root.dsPeakEnabled
-      color: root.dsPeakNow() ? root.dim : Color.accent
+      color: root.dsPeakNow() ? root.dsPeakColor : root.dsOffColor
     }
 
     MouseArea {
@@ -879,8 +874,8 @@ Panel {
 
                 Text {
                   anchors.verticalCenter: parent.verticalCenter
-                  width: Style.space(40)
-                  text: "Clock"
+                  width: Style.space(84)
+                  text: "Clock Deepseek"
                   textFormat: Text.PlainText
                   color: root.dim
                   font.family: root.fontFamily
@@ -935,8 +930,8 @@ Panel {
             }
           }
 
-          // DeepSeek pricing clock: always visible, needs no API key — pure
-          // UTC clock plus cached holidays. ASCII-only strings on purpose.
+          // DeepSeek pricing clock: dot in the current state color, one-line
+          // title, one-line windows. ASCII-only strings on purpose.
           Row {
             id: dsClockRow
             visible: root.dsPeakEnabled
@@ -944,31 +939,25 @@ Panel {
             spacing: Style.space(6)
 
             readonly property bool peak: root.dsPeakNow()
-            readonly property string flipIn: root.dsFlipLabel()
-            readonly property string holidayNote: root.cnHolidays.length > 0 && root.cnHolidaysYears.length > 0
-              ? "festivi CN " + root.cnHolidaysYears.join("/") + " inclusi"
-              : "festivi CN n/d (offline?)"
 
             Rectangle {
               anchors.verticalCenter: parent.verticalCenter
               width: Style.space(7)
               height: width
               radius: width / 2
-              color: parent.peak ? root.dim : Color.accent
+              color: parent.peak ? root.dsPeakColor : root.dsOffColor
             }
 
             Text {
               anchors.verticalCenter: parent.verticalCenter
               width: parent.width - Style.space(7) - parent.spacing
-              text: "DS " + (parent.peak
-                ? "PEAK - tariffa piena - off-peak tra " + parent.flipIn
-                : "OFF-PEAK - tariffe ridotte - peak tra " + parent.flipIn)
-                + "\nPeak lun-ven 01:00-04:00 e 06:00-10:00 UTC ("
+              text: "Deepseek peak/off times (" + (parent.peak ? "PEAK" : "OFF-PEAK") + ")\n"
+                + "lun-ven 01:00-04:00 e 06:00-10:00 UTC ("
                 + root.dsLocalHHMM(1, 0) + "-" + root.dsLocalHHMM(4, 0)
                 + " e " + root.dsLocalHHMM(6, 0) + "-" + root.dsLocalHHMM(10, 0)
-                + " locali) - " + parent.holidayNote
+                + " locali)"
               textFormat: Text.PlainText
-              color: parent.peak ? root.dim : root.foreground
+              color: root.foreground
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
               wrapMode: Text.WordWrap
