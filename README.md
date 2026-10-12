@@ -26,11 +26,11 @@ OC · 5h 0% [──] (4h) · W 79% [━━──] (2d) · M 46% [━───] (
   selector as segmented chips; no config files to hand-edit (but
   `omarchy bar set` works too).
 - **DeepSeek peak/off-peak indicator** — a discreet pricing-clock tag in
-  the bar (`DS` + dot: green = cheap off-peak, red = peak; needs no API
-  key) plus a compact row in the panel: `Deepseek peak/off times` with
-  the windows in UTC and PC-local equivalents. Peak Mon–Fri 01:00–04:00
-  and 06:00–10:00 UTC; off-peak the other 17 weekday hours, weekends
-  and Chinese public holidays.
+  the bar (`DS` + dot, theme colors: red = peak, green = off-peak; needs
+  no API key) plus a two-line legend in the panel (`Deepseek peak/off
+  times` with live state, peak windows in UTC and PC-local equivalents,
+  off-peak coverage). Peak Mon–Fri 01:00–04:00 and 06:00–10:00 UTC;
+  off-peak the other 17 weekday hours, weekends and Chinese public holidays.
 
 ## Supported providers
 

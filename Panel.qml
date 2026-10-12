@@ -140,11 +140,12 @@ Panel {
     return Qt.formatTime(new Date(Date.UTC(n.getUTCFullYear(), n.getUTCMonth(), n.getUTCDate(), h, m)), "hh:mm")
   }
   readonly property string dsTooltipSuffix: root.dsPeakEnabled ? (root.dsPeakNow() ? " · DS peak" : " · DS off-peak") : ""
-  // Pricing-clock colors: peak = theme red, off-peak = fixed green (the kit
-  // exposes no semantic green — Color has foreground/accent/urgent/muted
-  // only; this constant stays readable on dark bars).
+  // Pricing-clock colors: peak = theme red; off-peak green is derived from
+  // that same red (the kit exposes no semantic green — Color has only
+  // foreground/accent/urgent/muted), keeping saturation/value/alpha and
+  // rotating the hue to green, so it follows every theme.
   readonly property color dsPeakColor: root.urgent
-  readonly property color dsOffColor: "#6a9955"
+  readonly property color dsOffColor: Qt.hsva(0.33, root.urgent.hsvSaturation, root.urgent.hsvValue, root.urgent.a)
   // Pricing-clock master switch (off by default). Pure display + fetcher
   // flag; needs no API key. NOTE: the shell round-trips settings as STRINGS
   // (shell.json holds 'true'/'false'), so coerce instead of === true.
@@ -930,37 +931,75 @@ Panel {
             }
           }
 
-          // DeepSeek pricing clock: dot in the current state color, one-line
-          // title, one-line windows. ASCII-only strings on purpose.
-          Row {
+          // DeepSeek pricing clock legend: both colors explained, live state
+          // in the title. ASCII-only strings on purpose.
+          Column {
             id: dsClockRow
             visible: root.dsPeakEnabled
             width: parent.width
-            spacing: Style.space(6)
+            spacing: Style.space(4)
 
             readonly property bool peak: root.dsPeakNow()
-
-            Rectangle {
-              anchors.verticalCenter: parent.verticalCenter
-              width: Style.space(7)
-              height: width
-              radius: width / 2
-              color: parent.peak ? root.dsPeakColor : root.dsOffColor
-            }
+            readonly property string localRanges: root.dsLocalHHMM(1, 0) + "-" + root.dsLocalHHMM(4, 0)
+              + ", " + root.dsLocalHHMM(6, 0) + "-" + root.dsLocalHHMM(10, 0) + " local"
 
             Text {
-              anchors.verticalCenter: parent.verticalCenter
-              width: parent.width - Style.space(7) - parent.spacing
-              text: "Deepseek peak/off times (" + (parent.peak ? "PEAK" : "OFF-PEAK") + ")\n"
-                + "lun-ven 01:00-04:00 e 06:00-10:00 UTC ("
-                + root.dsLocalHHMM(1, 0) + "-" + root.dsLocalHHMM(4, 0)
-                + " e " + root.dsLocalHHMM(6, 0) + "-" + root.dsLocalHHMM(10, 0)
-                + " locali)"
+              width: parent.width
+              text: "Deepseek peak/off times - now " + (dsClockRow.peak ? "PEAK" : "OFF-PEAK")
               textFormat: Text.PlainText
               color: root.foreground
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
+              font.bold: true
               wrapMode: Text.WordWrap
+            }
+
+            Row {
+              width: parent.width
+              spacing: Style.space(6)
+
+              Rectangle {
+                anchors.verticalCenter: parent.verticalCenter
+                width: Style.space(7)
+                height: width
+                radius: width / 2
+                color: root.dsPeakColor
+              }
+
+              Text {
+                anchors.verticalCenter: parent.verticalCenter
+                width: parent.width - Style.space(7) - parent.spacing
+                text: "peak  Mon-Fri 01:00-04:00, 06:00-10:00 UTC (" + dsClockRow.localRanges + ")"
+                textFormat: Text.PlainText
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.WordWrap
+              }
+            }
+
+            Row {
+              width: parent.width
+              spacing: Style.space(6)
+
+              Rectangle {
+                anchors.verticalCenter: parent.verticalCenter
+                width: Style.space(7)
+                height: width
+                radius: width / 2
+                color: root.dsOffColor
+              }
+
+              Text {
+                anchors.verticalCenter: parent.verticalCenter
+                width: parent.width - Style.space(7) - parent.spacing
+                text: "off-peak  all other times, weekends, CN holidays"
+                textFormat: Text.PlainText
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.WordWrap
+              }
             }
           }
 
