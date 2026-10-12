@@ -10,8 +10,14 @@ Run: python3 -m unittest tests.test_cn_holidays -v
 """
 
 import importlib.util
+import json
+import os
+import tempfile
+import time
+import datetime
 import unittest
 from pathlib import Path
+from unittest import mock
 
 MODULE_PATH = Path(__file__).resolve().parent.parent / "fetch_usage.py"
 
@@ -89,6 +95,82 @@ class TestMergeHolidayDays(unittest.TestCase):
         days, years = fetch_usage._merge_holiday_days({"days": {}}, [2026])
         self.assertEqual(days, [])
         self.assertEqual(years, ["2026"])
+
+
+class TestValidCachedDays(unittest.TestCase):
+    """_valid_cached_days neutralizes a poisoned cache file on read."""
+
+    YEAR = 2026
+
+    def test_sanitizes_poison(self):
+        poison = [
+            "2026-10-12", "garbage", "x" * 1000000, "2026-13-99",
+            "2027-01-01", "2026-02-17",
+        ]
+        self.assertEqual(
+            fetch_usage._valid_cached_days(poison, self.YEAR),
+            ["2026-02-17", "2026-10-12"],
+        )
+
+    def test_rejects_non_list_and_oversized(self):
+        self.assertIsNone(fetch_usage._valid_cached_days("2026-01-01", self.YEAR))
+        self.assertIsNone(
+            fetch_usage._valid_cached_days(["2026-01-01"] * 60, self.YEAR)
+        )
+
+
+class TestLoadCnHolidays(unittest.TestCase):
+    """_load_cn_holidays: stale fallback, no bump on failure, size cap."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.cache = os.path.join(self.tmpdir, "cn-holidays.json")
+        patcher = mock.patch.object(fetch_usage, "HOLIDAY_CACHE_FILE", self.cache)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        now = datetime.datetime.now(datetime.timezone.utc)
+        self.year = now.year
+        self.good_day = "%d-01-01" % now.year
+
+    def _read_cache(self):
+        with open(self.cache, "r", encoding="utf-8") as handle:
+            return json.load(handle)
+
+    def test_failed_fetch_keeps_stale_without_bump(self):
+        stale = {"fetchedAt": 1, "attemptedAt": 0,
+                 "days": {str(self.year): [self.good_day]}}
+        with open(self.cache, "w", encoding="utf-8") as handle:
+            json.dump(stale, handle)
+        with mock.patch.object(
+            fetch_usage, "_request_public_json",
+            side_effect=ConnectionError("offline"),
+        ):
+            days, _ = fetch_usage._load_cn_holidays()
+        self.assertEqual(days, [self.good_day])
+        self.assertEqual(self._read_cache()["fetchedAt"], 1)
+
+    def test_fresh_poisoned_cache_neutralized_without_network(self):
+        poison = {"fetchedAt": int(time.time()), "attemptedAt": 0,
+                  "days": {str(self.year): [self.good_day, "garbage",
+                                              "x" * 100000] + ["2027-05-05"]}}
+        with open(self.cache, "w", encoding="utf-8") as handle:
+            json.dump(poison, handle)
+        with mock.patch.object(
+            fetch_usage, "_request_public_json",
+            side_effect=AssertionError("must not fetch when fresh"),
+        ):
+            days, _ = fetch_usage._load_cn_holidays()
+        self.assertEqual(days, [self.good_day])
+
+    def test_oversized_cache_file_ignored(self):
+        with open(self.cache, "w", encoding="utf-8") as handle:
+            handle.write('{"days": {"x": "' + "y" * 2000000 + '"}}')
+        with mock.patch.object(
+            fetch_usage, "_request_public_json",
+            side_effect=ConnectionError("offline"),
+        ):
+            days, _ = fetch_usage._load_cn_holidays()
+        self.assertEqual(days, [])
 
 
 class TestNoHolidaysFlag(unittest.TestCase):

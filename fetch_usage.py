@@ -83,6 +83,9 @@ HOLIDAY_TTL_SEC = 7 * 86400
 HOLIDAY_RETRY_SEC = 3600
 HOLIDAY_MAX_ENTRIES = 50
 HOLIDAY_MAX_BYTES = 65536
+# Cache-file read cap: generous (1 MiB) — per-entry sanitize + the 50-entry
+# merge cap neutralize poisoned files, so this only blocks absurd blobs.
+HOLIDAY_CACHE_MAX_BYTES = 1048576
 _HOLIDAY_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}\Z")
 
 TIMEOUT_SECONDS = 15
@@ -637,14 +640,36 @@ def _valid_holiday_dates(body, year: int):
     return sorted(set(days))
 
 
+def _valid_cached_days(days, year: int):
+    # Sanitize a cached year list: drop every entry that is not a real
+    # calendar YYYY-MM-DD date in *year*, cap the count. A poisoned cache
+    # file is neutralized on read (invalid entries never reach the payload)
+    # and heals on the next refresh.
+    if not isinstance(days, list) or len(days) > HOLIDAY_MAX_ENTRIES:
+        return None
+    clean = []
+    for day in days:
+        if not isinstance(day, str) or not _HOLIDAY_DATE_RE.match(day):
+            continue
+        try:
+            y, m, d = int(day[0:4]), int(day[5:7]), int(day[8:10])
+            datetime.date(y, m, d)
+        except ValueError:
+            continue
+        if y != year:
+            continue
+        clean.append(day)
+    return sorted(set(clean))[:HOLIDAY_MAX_ENTRIES]
+
+
 def _merge_holiday_days(cached, years):
     stored = cached.get("days", {})
-    days = sorted({
-        d for y in years
-        for d in (stored.get(str(y), []) if isinstance(stored.get(str(y)), list) else [])
-        if isinstance(d, str)
-    })
-    return days, [str(y) for y in years]
+    days = []
+    for y in years:
+        valid = _valid_cached_days(stored.get(str(y)), y)
+        if valid:
+            days.extend(valid)
+    return sorted(set(days))[:HOLIDAY_MAX_ENTRIES], [str(y) for y in years]
 
 
 def _load_cn_holidays():
@@ -664,6 +689,8 @@ def _load_cn_holidays():
     cache_path = _expand_home(HOLIDAY_CACHE_FILE)
     cached = {"fetchedAt": 0, "attemptedAt": 0, "days": {}}
     try:
+        if os.path.getsize(cache_path) > HOLIDAY_CACHE_MAX_BYTES:
+            raise OSError("holiday cache oversized")
         with open(cache_path, "r", encoding="utf-8") as handle:
             loaded = json.load(handle)
         if isinstance(loaded, dict) and isinstance(loaded.get("days"), dict):
@@ -681,24 +708,28 @@ def _load_cn_holidays():
     if time.time() - cached["attemptedAt"] < HOLIDAY_RETRY_SEC:
         return _merge_holiday_days(cached, years)
     cached["attemptedAt"] = int(time.time())
-    refreshed = False
+    failed = []
     for year in missing or years:
         try:
             body = _request_public_json(NAGER_HOLIDAYS_URL % year)
         except Exception:  # noqa: BLE001 - holidays are best-effort
+            failed.append(year)
             continue
         valid = _valid_holiday_dates(body, year)
         if valid is None:
+            failed.append(year)
             continue
         cached["days"][str(year)] = valid
-        refreshed = True
-    if refreshed:
+    if not failed:
+        # Every requested year refreshed: the TTL covers the whole cache.
+        # A partial December refresh leaves fetchedAt stale so the hourly
+        # retry gate picks up the failed year instead of waiting 7 days.
         cached["fetchedAt"] = int(time.time())
     try:
         parent = os.path.dirname(cache_path)
         if parent:
             os.makedirs(parent, exist_ok=True)
-        tmp_path = cache_path + ".tmp"
+        tmp_path = "%s.tmp.%d.%d" % (cache_path, os.getpid(), time.time_ns())
         with open(tmp_path, "w", encoding="utf-8") as handle:
             json.dump(cached, handle)
         os.replace(tmp_path, cache_path)

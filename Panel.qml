@@ -134,9 +134,11 @@ Panel {
   }
   function dsPeakNow() { return root.dsPeakAt(new Date(root.nowMs)) }
   // A UTC wall-clock time rendered in the PC's local zone (proves the
-  // "in base alla time zone del PC" requirement in the panel).
-  function dsLocalHHMM(h, m) {
-    var n = new Date()
+  // "in base alla time zone del PC" requirement in the panel). atMs
+  // anchors the date AND establishes the caller's nowMs tick dependency,
+  // so the legend survives UTC-midnight rollover and DST changes.
+  function dsLocalHHMM(h, m, atMs) {
+    var n = new Date(isFinite(atMs) ? atMs : Date.now())
     return Qt.formatTime(new Date(Date.UTC(n.getUTCFullYear(), n.getUTCMonth(), n.getUTCDate(), h, m)), "hh:mm")
   }
   readonly property string dsTooltipSuffix: root.dsPeakEnabled ? (root.dsPeakNow() ? " · DS peak" : " · DS off-peak") : ""
@@ -151,7 +153,9 @@ Panel {
   // (shell.json holds 'true'/'false'), so coerce instead of === true.
   readonly property bool dsPeakEnabled: {
     var v = root.setting("dsPeakClock", false);
-    return v === true || v === "true" || v === 1;
+    if (v === true || v === 1) return true;
+    var s = String(v).toLowerCase();
+    return s === "true" || s === "1";
   }
   // A toggle flip takes effect at the next fetch: re-fetch immediately so
   // the holidays payload (or its absence) matches the switch without
@@ -905,8 +909,8 @@ Panel {
                 spacing: Style.space(4)
 
                 readonly property bool peak: root.dsPeakNow()
-                readonly property string localRanges: root.dsLocalHHMM(1, 0) + "-" + root.dsLocalHHMM(4, 0)
-                  + ", " + root.dsLocalHHMM(6, 0) + "-" + root.dsLocalHHMM(10, 0) + " local"
+                readonly property string localRanges: root.dsLocalHHMM(1, 0, root.nowMs) + "-" + root.dsLocalHHMM(4, 0, root.nowMs)
+                  + ", " + root.dsLocalHHMM(6, 0, root.nowMs) + "-" + root.dsLocalHHMM(10, 0, root.nowMs) + " local"
 
                 Text {
                   width: parent.width
