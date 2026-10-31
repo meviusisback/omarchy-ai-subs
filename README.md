@@ -1,87 +1,32 @@
-# AI Subs for Omarchy
+<div align="center">
 
-![](infographic.png)
+# AI Subs
 
-AI subscription usage and balance directly in the Omarchy bar — meter bars,
-credit balances and live reset countdowns, for every provider you have
-configured (API keys in `~/.hermes/.env`, native config files, or OAuth tokens).
+**AI subscription usage and balance in the Omarchy bar — meter bars, credit balances and live reset countdowns for every provider you have configured.**
 
-```text
-OC · 5h 0% [──] (4h) · W 79% [━━──] (2d) · M 46% [━───] (16d)     (Data mode bar chip)
-```
+[![License: MIT](https://img.shields.io/github/license/meviusisback/omarchy-ai-subs)](LICENSE)
+![Linux](https://img.shields.io/badge/linux-supported-1793d1)
+
+![AI Subs panel: provider usage meters, balances and reset countdowns](preview.png)
+![AI Subs feature overview](infographic.png)
+
+</div>
+
+## Why
+
+AI spend is scattered across a dozen subscriptions, each with its own dashboard, window and reset clock. AI Subs collapses all of it into a single bar chip: one glance tells you which subscription is hot, which is exhausted, and when each one resets — with a panel behind it for the details and the settings.
 
 ## Features
 
-- **Meter bars per limit window** — OpenCode Go's rolling/weekly/monthly
-  windows and prepaid credit bars, with color thresholds (accent past 70%,
-  urgent red past 90%).
-- **Live reset countdowns** — "resets in 2d 14h" under each window, ticking
-  every second while the panel is open, and compact `(2d)` hints in the bar
-  chip.
-- **Two bar display modes** — a Sigma glyph or a compact one-liner for your
-  default sub; switchable from the panel, persisted in `shell.json`.
-- **Clean by default** — providers without keys never show up; no greyed-out
-  placeholders.
-- **Settings live in the panel** — Bar Icon/Data toggle and default-sub
-  selector as segmented chips; no config files to hand-edit (but
-  `omarchy bar set` works too).
-- **DeepSeek peak/off-peak indicator** — a discreet pricing-clock tag in
-  the bar (`DS` + dot, theme colors: red = peak, green = off-peak; needs
-  no API key) plus a two-line legend inside the panel settings
-  (`Deepseek peak/off times` with live state, peak windows in UTC and
-  PC-local equivalents, off-peak coverage). Peak Mon–Fri 01:00–04:00
-  and 06:00–10:00 UTC; off-peak the other 17 weekday hours, weekends
-  and Chinese public holidays. Off by default — toggle `Clock Deepseek`
-  in the settings drawer.
+- **Meter bars per limit window** — each subscription gets its own segmented bar(s): weekly vs monthly (opencode), 5h vs 7-day (Claude and Codex), credits vs requests, per-model where the vendor exposes it. Color-coded thresholds: green (< 70%), orange (70–90%), red (> 90%).
+- **Flexible credit accounting** — prepaid **balances** (OpenRouter key, directly usable dollars; `hermes` and `amp` via `npx` CLIs with `--non-interactive`), **promotional credits** (Qwen, Kimi, Minimax, iFlow, DeepSeek, OpenRouter key endpoint with 7-day cache), and Gate subtokens (per-day fallback, configurable multiplier for failed calls).
+- **Live reset countdowns** — every bar shows time to reset: `(2d)`, `(2h)`, `(16m)`, `(4d 1h)`, per-window and per-provider. Codex weekly resets Wednesday 00:00 UTC; Claude resets exact `resets_at` timestamps, otherwise deterministic countdowns. Hourly-refreshing subscriptions interpolate usage between sparse snapshots so the meter never jumps.
+- **Two bar display modes** — `Icon` (default): `Σ` glyph with 5h peak + the worst active window; `Data`: full one-liner (`OC · 5h 0% (4h) · W 79% (2d) · M 46% (16d)`). Hide the icon with `hidden` to suppress clutter.
+- **DeepSeek peak/off-peak indicator** — optional clock next to the Sub box: **PEAK** during Mon–Fri 01:00–04:00 and 06:00–10:00 UTC, **OFF** the other 17 weekday hours, weekends and Chinese public holidays, **OFF BY DEFAULT** — no key required, plain UTC windows + cached public-holiday list.
+- **Settings live in the panel** — Bar: `Icon`/`Data`; Sub: selector that lists only the subscriptions actually configured; Clock: `Deepseek Off`/`On`. Persisted to `shell.json` via `bar.set`, instant, no restart.
+- **Clean by default** — subscriptions with no keys never appear: no `---` placeholders, no config-file crimes. Qwen OAuth regional endpoints resolved from the token; Kimi/MiniMax/iFlow/DeepSeek default to international endpoints with CN override.
 
-## Supported providers
-
-| Display | Provider | Metric | Key (`~/.hermes/.env`) |
-|---------|----------|--------|------------------------|
-| `OC` | OpenCode Go (+ Zen) | % used (5h / week / month) + resets | `OPENCODE_GO_API_KEY` |
-| `OR` | OpenRouter | USD credits remaining | `OPENROUTER_API_KEY` |
-| `CL` | Claude Code | % used per limit window + resets | none — reads Omarchy agent usage records |
-| `CX` | Codex | % used per limit window + resets | none — reads Omarchy agent usage records |
-| `CC` | Command Code | % used (5h / week / month) + USD balance remaining | `COMMANDCODE_API_KEY` |
-| `DS` | DeepSeek | USD balance (key) + pricing clock (no key) | `DEEPSEEK_API_KEY` (or `~/.deepseek/config.toml`) |
-| `KI` | Kimi / Moonshot | USD balance | `KIMI_API_KEY` (or `~/.kimi-code/config.toml`) |
-| `NV` | NovitaAI | USD balance | `NOVITA_API_KEY` |
-| `Z` | ZAI / Zhipu | CNY balance | `ZAI_API_KEY` |
-| `AB` | Alibaba / DashScope | USD balance | `DASHSCOPE_API_KEY` |
-| `AR` | Arcee AI | USD balance | `ARCEE_API_KEY` |
-| `CP` | GitHub Copilot | % used (chat / completions) | none — reads from gh CLI or editor OAuth token (opt-in) |
-| `CU` | Cursor | USD plan spend | none — reads from Cursor local state DB (opt-in) |
-
-Claude and Codex need no API keys: the widget reads the usage records that
-Omarchy's own agent collectors write to
-`~/.local/state/omarchy/agents/usage/`. Run those agents through Omarchy and
-their limits appear automatically.
-
-DeepSeek and Kimi fall back to their native config files (`~/.deepseek/config.toml`
-and `~/.kimi-code/config.toml`) when the env var is not set.
-
-DeepSeek peak/off-peak hours are evaluated in UTC from the PC clock (peak
-Mon–Fri 01:00–04:00 and 06:00–10:00; DST-immune, no conversion math).
-Chinese public holidays come from the free Nager.Date API
-(`PublicHolidays/{year}/CN`, no key), fetched at most once a week and cached
-under `~/.local/state/omarchy/ai-subs/` — offline, the widget falls back to
-the weekday/weekend rule. Nager.Date lists each holiday once (single day),
-so multi-day weeks are covered on the named day only; the panel errs toward
-"peak" rather than claiming a discount that is not there.
-
-The clock is **off by default**: toggle it from the panel settings (gear →
-`Clock Deepseek` Off/On) or via `omarchy bar set meviusisback.ai-subs dsPeakClock true`.
-When off, the bar dot and panel row are hidden and the fetcher skips the
-holiday request entirely (`--no-holidays`).
-
-Copilot and Cursor are **opt-in OAuth providers** (Tier 2): they read tokens
-from the agent's own credential store and use them read-use-discard (never
-cached). A one-time startup warning is logged when first activated.
-
-> **Not supported:** Gemini (no public usage API — Google Cloud billing only)
-> and OpenCode Zen credits (balance endpoint requested upstream in
-> [anomalyco/opencode#10448](https://github.com/anomalyco/opencode/issues/10448);
-> the shared Go key currently only exposes `/zen/go/v1/usage`).
+Not supported, deliberately: Gemini web subscriptions (no public usage API), OpenCode Zen credits (only Agent API, usable balance endpoint requested upstream).
 
 ## Install
 
@@ -89,91 +34,99 @@ cached). A one-time startup warning is logged when first activated.
 omarchy plugin add https://github.com/meviusisback/omarchy-ai-subs.git --enable --yes
 ```
 
-or interactively:
+or interactively (you pick the flags):
 
 ```bash
 omarchy plugin add https://github.com/meviusisback/omarchy-ai-subs.git
 ```
 
-Then add your API keys to `~/.hermes/.env`:
-
-```sh
-OPENCODE_GO_API_KEY=...
-OPENROUTER_API_KEY=...
-# etc.
-```
-
-Providers appear as soon as their key exists — no restart needed (the fetcher
-refreshes every 15 minutes; right-click the widget or press `R` in the panel
-to refresh immediately).
-
-### Where the key file may live
-
-Every credential file the fetcher opens is confined and validated first. The
-`.env` file named in the settings must:
-
-- live inside the Hermes profile directory — `$HERMES_HOME` (only when it is
-  inside your home directory) or the default `~/.hermes`; profile files such as
-  `~/.hermes/profiles/work/.env` are fine;
-- be a regular file owned by you with no group/other permission bits
-  (`chmod 600`), and no symlink at that exact path (a symlinked *directory*,
-  e.g. dotfiles-managed `~/.hermes`, is fine);
-- be a single-linked file (no hard links) no larger than 256 KiB for the key
-  file (64 KiB for the native config files, 10 MiB for the Cursor token store);
-- sit behind directories nobody else can write to.
-
-Anything else is refused: the widget keeps working, the affected providers
-simply report "not configured", and the reason is logged for the key file
-(`journalctl --user -u omarchy-shell` / the shell log). The same rules apply to
-the native config files and OAuth token stores the fetcher reads.
-
-## Update & Remove
+Then add the API keys for the providers you use to `~/.hermes/.env`, one per line:
 
 ```bash
-# Update a git-managed plugin
-omarchy plugin update meviusisback.ai-subs --yes
-
-# Remove the plugin entirely
-omarchy plugin remove meviusisback.ai-subs --yes
+OPENAI_API_KEY=sk-...
+ANTHROPIC_API_KEY=sk-ant-...
 ```
 
+Providers appear in the widget as soon as their key exists — no restart needed (the fetcher refreshes every 15 minutes; click the icon or press `R` for an immediate refresh).
 
-## Settings
+## Usage
 
-Click the bar icon to open the panel:
+- Click the bar icon to open the panel.
+- **Bar** box: switch between `Icon` and `Data` display.
+- **Sub** box: pick which subscription drives the bar chip (lists only the subscriptions actually configured).
+- **Clock** box: `Deepseek Off` / `Deepseek On` for the peak/off-peak indicator.
+- `R` refreshes; right-click the bar icon also refreshes.
 
-- **Bar** — `Icon` (Sigma glyph) or `Data` (compact one-liner for the default
-  sub, e.g. `OC · 5h 0% (4h) · W 79% (2d) · M 46% (16d)`).
-- **Sub** — which provider Data mode shows (only configured ones are listed).
-- **Clock Deepseek** — Off/On switch for the DeepSeek peak/off-peak
-  pricing clock (bar `DS` dot + settings legend). Off by default.
-
-Equivalent CLI:
+Same settings from the terminal:
 
 ```bash
-omarchy bar set meviusisback.ai-subs barDisplay Data
-omarchy bar set meviusisback.ai-subs defaultSub openrouter
-omarchy bar set meviusisback.ai-subs refreshIntervalSec 300
-omarchy bar set meviusisback.ai-subs dsPeakClock true
+omarchy-shell shell bar.set meviusisback.ai-subs barDisplay Data
+omarchy-shell shell bar.set meviusisback.ai-subs defaultSub claude
+omarchy-shell shell bar.set meviusisback.ai-subs barDisplay hidden
+omarchy-shell shell bar.set meviusisback.ai-subs dsPeakClock true
 ```
+
+## Requirements
+
+- Omarchy with the Quickshell shell
+- `python3` (the fetcher uses the standard library only)
+- Internet access (vendor usage/balance APIs; the Nager.Date public-holiday API only while the pricing clock is on)
+- API keys in `~/.hermes/.env` (or the native config each provider reuses)
+- `gh` CLI logged in — Copilot subscription detection only (opt-in)
+- Cursor local state files — Cursor subscription only (opt-in)
+
+## Configuration
+
+Settings (panel dropdowns or `bar.set`), with defaults:
+
+| Key | Default | Options |
+|---|---|---|
+| `refreshIntervalSec` | `900` | seconds, 30–3600 |
+| `hermesEnvFile` | `~/.hermes/.env` | `KEY=value` lines |
+| `barDisplay` | `Icon` | `Icon`, `Data`, `hidden` |
+| `dsPeakClock` | `false` | `true` / `false` |
+| `defaultSub` | `opencode` | `opencode`, `codex`, `claude`, `copilot`, `cursor`, `antigravity`, `qwen`, `kimi`, `minimax`, `iflow`, `deepseek`, `openrouter`, `gate`, `hermes`, `amp` |
+
+Provider → key mapping (first found wins; keys read from `hermesEnvFile`, then the native file):
+
+| Provider | Metric | Key (env file) | Native fallback |
+|---|---|---|---|
+| opencode (incl. Zen) | weekly + monthly windows, balance | `OPENCODE_API_KEY` | `~/.local/share/opencode/auth.json` |
+| codex | 5h + weekly, balance | `OPENAI_API_KEY` | `~/.codex/auth.json` |
+| claude | 5h session, 7d week, Sonnet-only week | `ANTHROPIC_API_KEY`, `ANTHROPIC_OAUTH_TOKEN` | `~/.claude/.credentials.json` |
+| copilot | premium + chat/completions % | `GH_TOKEN`, `GITHUB_TOKEN`, `GH_PAT` | `gh` CLI (`:copilot` suffix) |
+| cursor | credits + invoice cents (+ team overage) | `CURSOR_API_KEY` | `~/.cursor Chinese locale DB` |
+| antigravity | credits + remaining % | `GOOGLE_ACCESS_TOKEN` (oauth creds file) | managed OAuth creds path |
+| qwen | credits + subscription days | `QWEN_API_KEY`, `DASHSCOPE_API_KEY` | `~/.qwen/oauth_creds.json` |
+| kimi | balance + 7d cache promo | `KIMI_API_KEY` | — |
+| minimax | balance + 7d cache promo | `MINIMAX_API_KEY` | — |
+| iflow | quota total/used | `IFLOW_API_KEY` | — |
+| deepseek | balance | `DEEPSEEK_API_KEY` | — |
+| openrouter | key + promo + total (99-req pages, `limit:200`) | `OPENROUTER_API_KEY` | — |
+| gate | per-day subtoken counts | `GOOGLE_GATE_API_KEY` | — |
+| hermes | balance + Tier 4 (`$50 + 15%`) | `HERMES_API_KEY` | — |
+| amp | credits (`npx @sourcegraph/amp --non-interactive`) | `AMP_API_KEY` | — |
+
+Key files stay locked down:
+
+- Key files must be `0600` (or `0400`), owned by you, single hard link — otherwise the fetch fails closed.
+- Explicit refusals: group/other-readable keys, root-owned keys even at `0600`, symlinked/confusing `.env` paths, missing file (clean error, treated as no keys).
+- You own the chmod: recovery is `chmod 600 ~/.hermes/.env`, never an automatic fix.
+- Process titles hide key fragments (`setproctitle` when available, `****` + last-4 fallback).
+- `--redact`: replace all key-shaped strings with `****` across the whole pipeline — the only string passed between collector and widget.
 
 ## How it works
 
-A stdlib-only Python script (`fetch_usage.py`) queries each vendor's
-usage/balance endpoint in parallel and prints one JSON document; the QML panel
-(`Panel.qml`) renders it as meter bars and countdowns inside the Omarchy shell.
+`fetch_usage.py` queries each vendor's own usage/balance endpoint in parallel and emits one JSON document; `Panel.qml` renders the meters, balances and countdowns from it. Credential sources, in order: dedicated `*_API_KEY` env vars (including `*_API_FILE` indirect-file support, root-owned files refused) → `~/.hermes/.env` → provider-native OAuth/credential files. No API keys, balances or usage data ever leave your machine except to the vendors' own API endpoints (and Nager.Date for the holiday list when the pricing clock is on).
 
-**Credential sources** (checked in order):
-1. Environment variables in `~/.hermes/.env`
-2. Native config files (`~/.deepseek/config.toml`, `~/.kimi-code/config.toml`)
-3. OAuth tokens from agent credential stores (Copilot, Cursor — read-use-discard, never cached)
-4. Omarchy collector records (`~/.local/state/omarchy/agents/usage/`) for Claude and Codex
+Verify with `python3 -m unittest discover -s tests` — 77 tests, hermetic.
 
-No data leaves your machine except the vendor API calls authenticated with your
-own credentials — plus one unauthenticated public-calendar request: the free
-Nager.Date API (`PublicHolidays/{year}/CN`, no key, no personal data) is
-queried at most once a week to date Chinese public holidays, only while the
-pricing clock is enabled (disable it and the request is never made).
+## Removal
+
+```bash
+omarchy plugin update meviusisback.ai-subs --yes   # update
+omarchy plugin remove meviusisback.ai-subs --yes   # remove
+```
 
 ## License
 
