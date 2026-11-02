@@ -18,15 +18,15 @@ AI spend is scattered across a dozen subscriptions, each with its own dashboard,
 
 ## Features
 
-- **Meter bars per limit window** — each subscription gets its own segmented bar(s): weekly vs monthly (opencode), 5h vs 7-day (Claude and Codex), credits vs requests, per-model where the vendor exposes it. Color-coded thresholds: green (< 70%), orange (70–90%), red (> 90%).
-- **Flexible credit accounting** — prepaid **balances** (OpenRouter key, directly usable dollars; `hermes` and `amp` via `npx` CLIs with `--non-interactive`), **promotional credits** (Qwen, Kimi, Minimax, iFlow, DeepSeek, OpenRouter key endpoint with 7-day cache), and Gate subtokens (per-day fallback, configurable multiplier for failed calls).
-- **Live reset countdowns** — every bar shows time to reset: `(2d)`, `(2h)`, `(16m)`, `(4d 1h)`, per-window and per-provider. Codex weekly resets Wednesday 00:00 UTC; Claude resets exact `resets_at` timestamps, otherwise deterministic countdowns. Hourly-refreshing subscriptions interpolate usage between sparse snapshots so the meter never jumps.
-- **Two bar display modes** — `Icon` (default): `Σ` glyph with 5h peak + the worst active window; `Data`: full one-liner (`OC · 5h 0% (4h) · W 79% (2d) · M 46% (16d)`). Hide the icon with `hidden` to suppress clutter.
+- **Meter bars per limit window** — each subscription gets its own meter(s) per limit window (rolling/weekly/monthly for OpenCode Go, 5h and 7-day for Claude and Codex, credit and balance bars elsewhere), coloured by theme: the accent past 70%, the urgent tone past 90%.
+- **Balance and credit accounting** — prepaid balances and credit/usage meters read from each vendor's own API (OpenRouter, Kimi, DeepSeek, NovitaAI, ZAI, Alibaba, Arcee, Command Code). The fetcher speaks HTTP only: it never shells out to a vendor CLI.
+- **Live reset countdowns** — each window shows the time to its reset (`(2d)`, `(2h)`, `(16m)`), taken from the `resetsAt` the vendor returns; a window whose vendor exposes no reset time simply shows none.
+- **Two bar display modes** — `Data` (default): a one-liner for the selected subscription (`OC · 5h 0% (4h) · W 79% (2d) · M 46% (16d)`); `Icon`: the `Σ` glyph alone. Hovering either form shows the same short tooltip — `AI Subs`, plus `· DS peak` / `· DS off-peak` when the pricing clock is on; the meters and balances live in the click-through panel.
 - **DeepSeek peak/off-peak indicator** — optional clock next to the Sub box: **PEAK** during Mon–Fri 01:00–04:00 and 06:00–10:00 UTC, **OFF** the other 17 weekday hours, weekends and Chinese public holidays, **OFF BY DEFAULT** — no key required, plain UTC windows + cached public-holiday list.
-- **Settings live in the panel** — Bar: `Icon`/`Data`; Sub: selector that lists only the subscriptions actually configured; Clock: `Deepseek Off`/`On`. Persisted to `shell.json` via `bar.set`, instant, no restart.
-- **Clean by default** — subscriptions with no keys never appear: no `---` placeholders, no config-file crimes. Qwen OAuth regional endpoints resolved from the token; Kimi/MiniMax/iFlow/DeepSeek default to international endpoints with CN override.
+- **Settings live in the panel** — Bar: `Icon`/`Data`; Sub: selector that lists only the subscriptions actually configured; Clock: `Deepseek Off`/`On`. Written straight into the bar entry (`updateEntryInline`), so the change applies without a restart.
+- **Clean by default** — providers with no credentials never show as empty rows; Claude Code and Codex read local session data and need no key at all.
 
-Not supported, deliberately: Gemini web subscriptions (no public usage API), OpenCode Zen credits (only Agent API, usable balance endpoint requested upstream).
+Not supported, deliberately: Gemini web subscriptions (no public usage API).
 
 ## Install
 
@@ -40,14 +40,16 @@ or interactively (you pick the flags):
 omarchy plugin add https://github.com/meviusisback/omarchy-ai-subs.git
 ```
 
-Then add the API keys for the providers you use to `~/.hermes/.env`, one per line:
+Then add the keys for the providers you use to `~/.hermes/.env`, one per line:
 
 ```bash
-OPENAI_API_KEY=sk-...
-ANTHROPIC_API_KEY=sk-ant-...
+OPENCODE_GO_API_KEY=...
+OPENROUTER_API_KEY=sk-or-...
 ```
 
-Providers appear in the widget as soon as their key exists — no restart needed (the fetcher refreshes every 15 minutes; click the icon or press `R` for an immediate refresh).
+Claude Code and Codex need no key: they read their own local session data.
+
+Providers appear in the widget as soon as their key exists — no restart needed (the fetcher refreshes every 15 minutes; right-click the bar icon or press `R` for an immediate refresh).
 
 ## Usage
 
@@ -57,14 +59,15 @@ Providers appear in the widget as soon as their key exists — no restart needed
 - **Clock** box: `Deepseek Off` / `Deepseek On` for the peak/off-peak indicator.
 - `R` refreshes; right-click the bar icon also refreshes.
 
-Same settings from the terminal:
+Same settings from the terminal — the shell's bar-widget IPC:
 
 ```bash
-omarchy-shell shell bar.set meviusisback.ai-subs barDisplay Data
-omarchy-shell shell bar.set meviusisback.ai-subs defaultSub claude
-omarchy-shell shell bar.set meviusisback.ai-subs barDisplay hidden
-omarchy-shell shell bar.set meviusisback.ai-subs dsPeakClock true
+omarchy-shell shell setBarWidget meviusisback.ai-subs barDisplay '"Data"' '{}'
+omarchy-shell shell setBarWidget meviusisback.ai-subs defaultSub '"claude"' '{}'
+omarchy-shell shell setBarWidget meviusisback.ai-subs dsPeakClock 'true' '{}'
 ```
+
+The value is passed as JSON (`'"Data"'` for a string, `'true'` for a boolean).
 
 ## Requirements
 
@@ -72,52 +75,50 @@ omarchy-shell shell bar.set meviusisback.ai-subs dsPeakClock true
 - `python3` (the fetcher uses the standard library only)
 - Internet access (vendor usage/balance APIs; the Nager.Date public-holiday API only while the pricing clock is on)
 - API keys in `~/.hermes/.env` (or the native config each provider reuses)
-- `gh` CLI logged in — Copilot subscription detection only (opt-in)
-- Cursor local state files — Cursor subscription only (opt-in)
+- GitHub Copilot token in `~/.config/github-copilot/apps.json`, or `GITHUB_TOKEN` / `~/.config/gh/hosts.yml` — Copilot usage only, picked up automatically when one of them exists
+- Cursor local state (`~/.cursor/state.vscdb`) — Cursor usage only, opened read-only through SQLite when that file exists
 
 ## Configuration
 
-Settings (panel dropdowns or `bar.set`), with defaults:
+Settings (panel dropdowns or the shell's `setBarWidget` IPC), with defaults:
 
 | Key | Default | Options |
 |---|---|---|
 | `refreshIntervalSec` | `900` | seconds, 30–3600 |
 | `hermesEnvFile` | `~/.hermes/.env` | `KEY=value` lines |
-| `barDisplay` | `Icon` | `Icon`, `Data`, `hidden` |
+| `barDisplay` | `Data` | `Icon`, `Data` |
 | `dsPeakClock` | `false` | `true` / `false` |
-| `defaultSub` | `opencode` | `opencode`, `codex`, `claude`, `copilot`, `cursor`, `antigravity`, `qwen`, `kimi`, `minimax`, `iflow`, `deepseek`, `openrouter`, `gate`, `hermes`, `amp` |
+| `defaultSub` | `opencode` | `opencode`, `openrouter`, `claude`, `codex`, `commandcode`, `deepseek`, `kimi`, `novita`, `zai`, `alibaba`, `arcee`, `copilot`, `cursor` |
 
-Provider → key mapping (first found wins; keys read from `hermesEnvFile`, then the native file):
+Provider → credential mapping (the `hermesEnvFile` keys are loaded into the environment first and override same-named exported variables, then the provider's own file is used when no key is set):
 
-| Provider | Metric | Key (env file) | Native fallback |
-|---|---|---|---|
-| opencode (incl. Zen) | weekly + monthly windows, balance | `OPENCODE_API_KEY` | `~/.local/share/opencode/auth.json` |
-| codex | 5h + weekly, balance | `OPENAI_API_KEY` | `~/.codex/auth.json` |
-| claude | 5h session, 7d week, Sonnet-only week | `ANTHROPIC_API_KEY`, `ANTHROPIC_OAUTH_TOKEN` | `~/.claude/.credentials.json` |
-| copilot | premium + chat/completions % | `GH_TOKEN`, `GITHUB_TOKEN`, `GH_PAT` | `gh` CLI (`:copilot` suffix) |
-| cursor | credits + invoice cents (+ team overage) | `CURSOR_API_KEY` | `~/.cursor Chinese locale DB` |
-| antigravity | credits + remaining % | `GOOGLE_ACCESS_TOKEN` (oauth creds file) | managed OAuth creds path |
-| qwen | credits + subscription days | `QWEN_API_KEY`, `DASHSCOPE_API_KEY` | `~/.qwen/oauth_creds.json` |
-| kimi | balance + 7d cache promo | `KIMI_API_KEY` | — |
-| minimax | balance + 7d cache promo | `MINIMAX_API_KEY` | — |
-| iflow | quota total/used | `IFLOW_API_KEY` | — |
-| deepseek | balance | `DEEPSEEK_API_KEY` | — |
-| openrouter | key + promo + total (99-req pages, `limit:200`) | `OPENROUTER_API_KEY` | — |
-| gate | per-day subtoken counts | `GOOGLE_GATE_API_KEY` | — |
-| hermes | balance + Tier 4 (`$50 + 15%`) | `HERMES_API_KEY` | — |
-| amp | credits (`npx @sourcegraph/amp --non-interactive`) | `AMP_API_KEY` | — |
+| Provider | Key (env file) | Native fallback |
+|---|---|---|
+| opencode | `OPENCODE_GO_API_KEY`, `OPENCODE_ZEN_API_KEY` | — |
+| openrouter | `OPENROUTER_API_KEY` | — |
+| claude | — (local session data, no key) | `~/.local/state/omarchy/agents/usage/claude.json` (the same collector record the built-in Agents widget uses) |
+| codex | — (local session data, no key) | `~/.local/state/omarchy/agents/usage/codex.json` |
+| deepseek | `DEEPSEEK_API_KEY` | `~/.deepseek/config.toml` |
+| kimi | `KIMI_API_KEY`, `MOONSHOT_API_KEY` | `~/.kimi-code/config.toml` |
+| novita | `NOVITA_API_KEY` | — |
+| zai | `ZAI_API_KEY`, `GLM_API_KEY` | — |
+| alibaba | `DASHSCOPE_API_KEY` | — |
+| arcee | `ARCEE_API_KEY` | — |
+| commandcode | `COMMANDCODE_API_KEY` | — |
+| copilot | — (OAuth token) | `~/.config/github-copilot/apps.json`, `GITHUB_TOKEN`, or `~/.config/gh/hosts.yml` |
+| cursor | — (OAuth token) | `~/.cursor/state.vscdb`, opened read-only |
 
 Key files stay locked down:
 
-- Key files must be `0600` (or `0400`), owned by you, single hard link — otherwise the fetch fails closed.
-- Explicit refusals: group/other-readable keys, root-owned keys even at `0600`, symlinked/confusing `.env` paths, missing file (clean error, treated as no keys).
+- The credential file must be a regular, single-linked file owned by you, with no group/other permission bits (`0600`, `0400` or any stricter mode), inside the allowed roots (the Hermes profile directory or `~/.hermes`). It is opened with `O_NOFOLLOW` and re-validated on the descriptor itself — anything else is refused and the keys that file would have supplied are simply absent.
+- Explicit refusals, written to the shell log (`stderr` of the fetcher); the widget keeps rendering and the providers it would have supplied simply report no key: a symlink, more than one hard link, a different owner, group/other-readable bits, a path outside the allowed roots, or a file over 256 KiB.
 - You own the chmod: recovery is `chmod 600 ~/.hermes/.env`, never an automatic fix.
-- Process titles hide key fragments (`setproctitle` when available, `****` + last-4 fallback).
-- `--redact`: replace all key-shaped strings with `****` across the whole pipeline — the only string passed between collector and widget.
+- Provider failures reach the panel only as a short code (`http-401`, `network-error`, `unexpected-response`), never as the vendor's raw body, so nothing a vendor echoes back can carry a key into the UI.
+- No secret ever reaches a process argument list: the fetcher is invoked with a fixed argv (the interpreter, `fetch_usage.py`, `--env` and the configured path, plus `--no-holidays` when the pricing clock is off), and keys travel only in HTTP `Authorization` headers built in memory.
 
 ## How it works
 
-`fetch_usage.py` queries each vendor's own usage/balance endpoint in parallel and emits one JSON document; `Panel.qml` renders the meters, balances and countdowns from it. Credential sources, in order: dedicated `*_API_KEY` env vars (including `*_API_FILE` indirect-file support, root-owned files refused) → `~/.hermes/.env` → provider-native OAuth/credential files. No API keys, balances or usage data ever leave your machine except to the vendors' own API endpoints (and Nager.Date for the holiday list when the pricing clock is on).
+`fetch_usage.py` queries each vendor's own usage/balance endpoint in parallel and emits one JSON document; `Panel.qml` renders the meters, balances and countdowns from it. Credential sources, in order: the keys in the Hermes `.env` you point at with `hermesEnvFile` (loaded into the environment, so they win over same-named exported variables) → provider-native files (`~/.deepseek/config.toml`, `~/.kimi-code/config.toml`, the Copilot token file or `GITHUB_TOKEN` / `~/.config/gh/hosts.yml`, Cursor's local SQLite state). No API keys, balances or usage data ever leave your machine except to the vendors' own API endpoints (and Nager.Date for the holiday list when the pricing clock is on); redirects are followed only within the same origin, so a key is never forwarded to another host or downgraded to plaintext.
 
 Verify with `python3 -m unittest discover -s tests` — 77 tests, hermetic.
 
