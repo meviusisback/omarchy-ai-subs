@@ -1,72 +1,33 @@
-# AI Subs for Omarchy
+<div align="center">
 
-![](infographic.png)
+# AI Subs
 
-AI subscription usage and balance directly in the Omarchy bar — meter bars,
-credit balances and live reset countdowns, for every provider you have
-configured (API keys in `~/.hermes/.env` or Bitwarden Secrets Manager, native
-config files, or OAuth tokens).
+**AI subscription usage and balance in the Omarchy bar — meter bars, credit balances and live reset countdowns for every provider you have configured.**
 
-```text
-OC · 5h 0% [──] (4h) · W 79% [━━──] (2d) · M 46% [━───] (16d)     (Data mode bar chip)
-```
+[![License: MIT](https://img.shields.io/github/license/meviusisback/omarchy-ai-subs)](LICENSE)
+![Linux](https://img.shields.io/badge/linux-supported-1793d1)
+
+![AI Subs panel: provider usage meters, balances and reset countdowns](preview.png)
+![AI Subs feature overview](infographic.png)
+
+</div>
+
+## Why
+
+AI spend is scattered across a dozen subscriptions, each with its own dashboard, window and reset clock. AI Subs collapses all of it into a single bar chip: one glance tells you which subscription is hot, which is exhausted, and when each one resets — with a panel behind it for the details and the settings.
 
 ## Features
 
-- **Meter bars per limit window** — OpenCode Go's rolling/weekly/monthly
-  windows and prepaid credit bars, with color thresholds (accent past 70%,
-  urgent red past 90%).
-- **Live reset countdowns** — "resets in 2d 14h" under each window, ticking
-  every second while the panel is open, and compact `(2d)` hints in the bar
-  chip.
-- **Two bar display modes** — a Sigma glyph or a compact one-liner for your
-  default sub; switchable from the panel, persisted in `shell.json`.
-- **Clean by default** — providers without keys never show up; no greyed-out
-  placeholders.
-- **Settings live in the panel** — Bar Icon/Data toggle and default-sub
-  selector as segmented chips; no config files to hand-edit (but
-  `omarchy bar set` works too).
+- **Meter bars per limit window** — each subscription gets its own meter(s) per limit window (rolling/weekly/monthly for OpenCode Go, 5h and 7-day for Claude and Codex, credit and balance bars elsewhere), coloured by theme: the accent past 70%, the urgent tone past 90%.
+- **Balance and credit accounting** — prepaid balances and credit/usage meters read from each vendor's own API (OpenRouter, Kimi, DeepSeek, NovitaAI, ZAI, Alibaba, Arcee, Command Code). The fetcher speaks HTTP only: it never shells out to a vendor CLI.
+- **Live reset countdowns** — each window shows the time to its reset (`(2d)`, `(2h)`, `(16m)`), taken from the `resetsAt` the vendor returns; a window whose vendor exposes no reset time simply shows none.
+- **Two bar display modes** — `Data` (default): a one-liner for the selected subscription (`OC · 5h 0% (4h) · W 79% (2d) · M 46% (16d)`); `Icon`: the `Σ` glyph alone. Hovering either form shows the same short tooltip — `AI Subs`, plus `· DS peak` / `· DS off-peak` when the pricing clock is on; the meters and balances live in the click-through panel.
+- **DeepSeek peak/off-peak indicator** — optional clock next to the Sub box: **PEAK** during Mon–Fri 01:00–04:00 and 06:00–10:00 UTC, **OFF** the other 17 weekday hours, weekends and Chinese public holidays, **OFF BY DEFAULT** — no key required, plain UTC windows + cached public-holiday list.
+- **Settings live in the panel** — Bar: `Icon`/`Data`; Sub: selector that lists only the subscriptions actually configured; Clock: `Deepseek Off`/`On`. Written straight into the bar entry (`updateEntryInline`), so the change applies without a restart.
+- **Clean by default** — providers with no credentials never show as empty rows; Claude Code and Codex read local session data and need no key at all.
+- **Bitwarden Secrets Manager (optional)** — keys missing from the `.env` file can come from a Bitwarden project instead; `.env` values always win, nothing is written to disk, and with the integration off (the default) no `bws` process is spawned and no extra request is made.
 
-## Supported providers
-
-| Display | Provider | Metric | Key source |
-|---------|----------|--------|------------------------|
-| `OC` | OpenCode Go (+ Zen) | % used (5h / week / month) + resets | `OPENCODE_GO_API_KEY` |
-| `OR` | OpenRouter | USD credits remaining | `OPENROUTER_API_KEY` |
-| `CL` | Claude Code | % used per limit window + resets | none — reads Omarchy agent usage records |
-| `CX` | Codex | % used per limit window + resets | none — reads Omarchy agent usage records |
-| `CC` | Command Code | % used (5h / week / month) + USD balance remaining | `COMMANDCODE_API_KEY` |
-| `DS` | DeepSeek | USD balance | `DEEPSEEK_API_KEY` (or `~/.deepseek/config.toml`) |
-| `KI` | Kimi / Moonshot | USD balance | `KIMI_API_KEY` (or `~/.kimi-code/config.toml`) |
-| `NV` | NovitaAI | USD balance | `NOVITA_API_KEY` |
-| `Z` | ZAI / Zhipu | CNY balance | `ZAI_API_KEY` |
-| `AB` | Alibaba / DashScope | USD balance | `DASHSCOPE_API_KEY` |
-| `AR` | Arcee AI | USD balance | `ARCEE_API_KEY` |
-| `CP` | GitHub Copilot | % used (chat / completions) | `GITHUB_TOKEN` if set, else the gh CLI config file (`~/.config/gh/hosts.yml`) or the editor OAuth token (opt-in) |
-| `CU` | Cursor | USD plan spend | none — reads from Cursor local state DB (opt-in) |
-
-Claude and Codex need no API keys: the widget reads the usage records that
-Omarchy's own agent collectors write to
-`~/.local/state/omarchy/agents/usage/`. Run those agents through Omarchy and
-their limits appear automatically.
-
-Every keyed row above can also come from Bitwarden Secrets Manager when it is
-configured — see [Bitwarden Secrets Manager (optional)](#bitwarden-secrets-manager-optional);
-when a key exists in both places, the `.env` value wins.
-
-DeepSeek and Kimi fall back to their native config files (`~/.deepseek/config.toml`
-and `~/.kimi-code/config.toml`) when the env var is not set.
-
-Copilot and Cursor are **opt-in OAuth providers** (Tier 2): they read tokens
-from the agent's own credential store and use them read-use-discard (never
-cached, never logged). Activation is passive: the provider appears as soon as
-the token already exists in the environment or credential store — nothing is
-written and no opt-in flag is required.
-
-> **Not supported:** Gemini (no public usage API — Google Cloud billing only)
-> and OpenCode Zen credits (balance endpoint requested upstream in
-> [anomalyco/opencode#10448](https://github.com/anomalyco/opencode/issues/10448);
-> the shared Go key currently only exposes `/zen/go/v1/usage`).
+Not supported, deliberately: Gemini web subscriptions (no public usage API — Google Cloud billing only), and OpenCode Zen credits (balance endpoint requested upstream in [anomalyco/opencode#10448](https://github.com/anomalyco/opencode/issues/10448); the shared Go key currently only exposes `/zen/go/v1/usage`).
 
 ## Install
 
@@ -74,79 +35,87 @@ written and no opt-in flag is required.
 omarchy plugin add https://github.com/meviusisback/omarchy-ai-subs.git --enable --yes
 ```
 
-or interactively:
+or interactively (you pick the flags):
 
 ```bash
 omarchy plugin add https://github.com/meviusisback/omarchy-ai-subs.git
 ```
 
-Then add your API keys to `~/.hermes/.env`:
+Then add the keys for the providers you use to `~/.hermes/.env`, one per line:
 
-```sh
+```bash
 OPENCODE_GO_API_KEY=...
-OPENROUTER_API_KEY=...
-# etc.
+OPENROUTER_API_KEY=sk-or-...
 ```
 
-Providers appear as soon as their key exists — no restart needed (the fetcher
-refreshes every 15 minutes; right-click the widget or press `R` in the panel
-to refresh immediately). Keys kept in Bitwarden Secrets Manager work too — see
-[Bitwarden Secrets Manager (optional)](#bitwarden-secrets-manager-optional);
-when a key exists in both places, the `.env` value wins.
+Claude Code and Codex need no key: they read their own local session data.
 
-## Update & Remove
+Providers appear in the widget as soon as their key exists — no restart needed (the fetcher refreshes every 15 minutes; right-click the bar icon or press `R` for an immediate refresh). Keys kept in Bitwarden Secrets Manager work too — see [Bitwarden Secrets Manager (optional)](#bitwarden-secrets-manager-optional); when a key exists in both places, the `.env` value wins.
+
+## Usage
+
+- Click the bar icon to open the panel.
+- **Bar** box: switch between `Icon` and `Data` display.
+- **Sub** box: pick which subscription drives the bar chip (lists only the subscriptions actually configured).
+- **Clock** box: `Deepseek Off` / `Deepseek On` for the peak/off-peak indicator.
+- `R` refreshes; right-click the bar icon also refreshes.
+
+Same settings from the terminal — the shell's bar-widget IPC:
 
 ```bash
-# Update a git-managed plugin
-omarchy plugin update meviusisback.ai-subs --yes
-
-# Remove the plugin entirely
-omarchy plugin remove meviusisback.ai-subs --yes
+omarchy-shell shell setBarWidget meviusisback.ai-subs barDisplay '"Data"' '{}'
+omarchy-shell shell setBarWidget meviusisback.ai-subs defaultSub '"claude"' '{}'
+omarchy-shell shell setBarWidget meviusisback.ai-subs dsPeakClock 'true' '{}'
 ```
 
+The value is passed as JSON (`'"Data"'` for a string, `'true'` for a boolean).
 
-## Settings
+## Requirements
 
-Click the bar icon to open the panel:
+- Omarchy with the Quickshell shell
+- `python3` (the fetcher uses the standard library only)
+- Internet access (vendor usage/balance APIs; the Nager.Date public-holiday API only while the pricing clock is on; the Bitwarden Secrets Manager API only while that integration is on)
+- API keys in `~/.hermes/.env` (or the native config each provider reuses, or Bitwarden Secrets Manager — see below)
+- GitHub Copilot token in `~/.config/github-copilot/apps.json`, or `GITHUB_TOKEN` / `~/.config/gh/hosts.yml` — Copilot usage only, picked up automatically when one of them exists
+- Cursor local state (`~/.cursor/state.vscdb`) — Cursor usage only, opened read-only through SQLite when that file exists
 
-- **Bar** — `Icon` (Sigma glyph) or `Data` (compact one-liner for the default
-  sub, e.g. `OC · 5h 0% (4h) · W 79% (2d) · M 46% (16d)`).
-- **Sub** — which provider Data mode shows (only configured ones are listed).
+## Configuration
 
-Equivalent CLI:
+Settings (panel dropdowns or the shell's `setBarWidget` IPC), with defaults:
 
-```bash
-omarchy bar set meviusisback.ai-subs barDisplay Data
-omarchy bar set meviusisback.ai-subs defaultSub openrouter
-omarchy bar set meviusisback.ai-subs refreshIntervalSec 300
-```
+| Key | Default | Options |
+|---|---|---|
+| `refreshIntervalSec` | `900` | seconds, 30–3600 |
+| `hermesEnvFile` | `~/.hermes/.env` | `KEY=value` lines |
+| `barDisplay` | `Data` | `Icon`, `Data` |
+| `dsPeakClock` | `false` | `true` / `false` |
+| `defaultSub` | `opencode` | `opencode`, `openrouter`, `claude`, `codex`, `deepseek`, `kimi`, `novita`, `zai`, `alibaba`, `arcee`, `commandcode`, `copilot`, `cursor` |
 
-## How it works
+Provider → credential mapping (the `hermesEnvFile` keys are loaded into the environment first and override same-named exported variables, then Bitwarden fills what is still missing when enabled, then the provider's own file is used when no key is set):
 
-A stdlib-only Python script (`fetch_usage.py`) queries each vendor's
-usage/balance endpoint in parallel and prints one JSON document; the QML panel
-(`Panel.qml`) renders it as meter bars and countdowns inside the Omarchy shell.
+| Provider | Key (env file) | Native fallback |
+|---|---|---|
+| opencode | `OPENCODE_GO_API_KEY`, `OPENCODE_ZEN_API_KEY` | — |
+| openrouter | `OPENROUTER_API_KEY` | — |
+| claude | — (local session data, no key) | `~/.local/state/omarchy/agents/usage/claude.json` (the same collector record the built-in Agents widget uses) |
+| codex | — (local session data, no key) | `~/.local/state/omarchy/agents/usage/codex.json` |
+| deepseek | `DEEPSEEK_API_KEY` | `~/.deepseek/config.toml` |
+| kimi | `KIMI_API_KEY`, `MOONSHOT_API_KEY` | `~/.kimi-code/config.toml` |
+| novita | `NOVITA_API_KEY` | — |
+| zai | `ZAI_API_KEY`, `GLM_API_KEY` | — |
+| alibaba | `DASHSCOPE_API_KEY` | — |
+| arcee | `ARCEE_API_KEY` | — |
+| commandcode | `COMMANDCODE_API_KEY` | — |
+| copilot | — (OAuth token) | `~/.config/github-copilot/apps.json`, `GITHUB_TOKEN`, or `~/.config/gh/hosts.yml` |
+| cursor | — (OAuth token) | `~/.cursor/state.vscdb`, opened read-only |
 
-**Credential sources** — API keys are resolved in this order, each source only
-filling what the previous ones did not supply:
-1. Environment variables in the `--env` file (`~/.hermes/.env` by default)
-2. Bitwarden Secrets Manager — **optional, off by default** (see below). Values
-   it resolves are exported into the same environment, so downstream they
-   behave exactly like source 1
-3. Native config files (`~/.deepseek/config.toml`, `~/.kimi-code/config.toml`)
+Key files stay locked down:
 
-Providers that need **no API key** at all: OAuth tokens from agent credential
-stores (Copilot, Cursor — read-use-discard, never cached) and Omarchy collector
-records (`~/.local/state/omarchy/agents/usage/`) for Claude and Codex.
-
-**Network egress**, stated exactly:
-- the vendor usage/balance endpoints listed above, authenticated with your own key;
-- `bws secret list` against Bitwarden's Secrets Manager API — **only** when
-  `secrets.bitwarden` is enabled in `~/.hermes/config.yaml` *and* a key is still
-  missing. With the integration off (the default) the widget makes zero extra
-  requests and behaves exactly as it did without the feature;
-- `date.nager.at` (public holidays, no credentials) — only when the optional
-  DeepSeek peak-clock setting is on, which is off by default.
+- The credential file must be a regular, single-linked file owned by you, with no group/other permission bits (`0600`, `0400` or any stricter mode), inside the allowed roots (the Hermes profile directory or `~/.hermes`). It is opened with `O_NOFOLLOW` and re-validated on the descriptor itself — anything else is refused and the keys that file would have supplied are simply absent.
+- Explicit refusals, written to the shell log (`stderr` of the fetcher); the widget keeps rendering and the providers it would have supplied simply report no key: a symlink, more than one hard link, a different owner, group/other-readable bits, a path outside the allowed roots, or a file over 256 KiB.
+- You own the chmod: recovery is `chmod 600 ~/.hermes/.env`, never an automatic fix.
+- Provider failures reach the panel only as a short code (`http-401`, `network-error`, `unexpected-response`), never as the vendor's raw body, so nothing a vendor echoes back can carry a key into the UI.
+- No secret ever reaches a process argument list: the fetcher is invoked with a fixed argv (the interpreter, `fetch_usage.py`, `--env` and the configured path, plus `--no-holidays` when the pricing clock is off), and keys travel only in HTTP `Authorization` headers built in memory. The bootstrap token reaches `bws` through the child's environment, never on its command line.
 
 ## Bitwarden Secrets Manager (optional)
 
@@ -157,17 +126,26 @@ hermes secrets bitwarden setup    # stores one bootstrap token (BWS_ACCESS_TOKEN
 hermes secrets bitwarden status
 ```
 
-After that the fetcher resolves whatever key the `.env` file does not have by
-running `bws secret list <project>` with that bootstrap token. Guarantees:
+After that the fetcher resolves whatever key the `.env` file does not have by running `bws secret list <project>` with that bootstrap token. Guarantees:
 
 - **`.env` values always win** — a key already in the file is never overridden.
-- Nothing is written to disk: fetched values live in the fetcher's process
-  environment only for the duration of one run, and the bootstrap token is
-  passed to `bws` through the child's environment, never on its command line.
+- Nothing is written to disk: fetched values live in the fetcher's process environment only for the duration of one run, and the bootstrap token is passed to `bws` through the child's environment, never on its command line.
 - Not configured → no `bws` process is spawned at all and no request is made.
-- `server_url` must be `https://` without embedded credentials, `project_id`
-  must be a UUID, and the token variable must be a Bitwarden-shaped name —
-  anything else in the config is ignored with one line in the shell log.
+- `server_url` must be `https://` without embedded credentials, `project_id` must be a UUID, and the token variable must be a Bitwarden-shaped name — anything else in the config is ignored with one line in the shell log.
+- Only the integrity-checked Hermes-pinned `bws` is ever executed (trusted directory, no symlinks, owned file without group/other write bits); the session `PATH` is never consulted.
+
+## How it works
+
+`fetch_usage.py` queries each vendor's own usage/balance endpoint in parallel and emits one JSON document; `Panel.qml` renders the meters, balances and countdowns from it. Credential sources, in order: the keys in the Hermes `.env` you point at with `hermesEnvFile` (loaded into the environment, so they win over same-named exported variables) → Bitwarden Secrets Manager when enabled (fills only what is still missing; off by default, zero extra requests when off) → provider-native files (`~/.deepseek/config.toml`, `~/.kimi-code/config.toml`, the Copilot token file or `GITHUB_TOKEN` / `~/.config/gh/hosts.yml`, Cursor's local SQLite state). No API keys, balances or usage data ever leave your machine except to the vendors' own API endpoints, the Bitwarden Secrets Manager API when that integration is on (and Nager.Date for the holiday list when the pricing clock is on); redirects are followed only within the same origin, so a key is never forwarded to another host or downgraded to plaintext.
+
+Verify with `python3 -m unittest discover -s tests` — 83 tests, hermetic.
+
+## Removal
+
+```bash
+omarchy plugin update meviusisback.ai-subs --yes   # update
+omarchy plugin remove meviusisback.ai-subs --yes   # remove
+```
 
 ## License
 
