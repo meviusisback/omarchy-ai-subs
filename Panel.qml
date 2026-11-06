@@ -297,6 +297,9 @@ Panel {
     readonly property string chipText: root.compactSubText(sub)
     readonly property bool failed: root.errorText !== "" && root.errorText.indexOf("fetch-failed") === 0
     readonly property color chipColor: failed ? root.urgent : root.foreground
+    // Symmetric side padding: content starts at sidePadding from the left edge
+    // and implicitWidth reserves the same on the right (was: 0 left, 17sp right).
+    readonly property real sidePadding: Style.space(6)
 
     // The bar routes module clicks through this exact interface
     // (Bar.pressModuleClickTarget); without it the click is treated as
@@ -310,12 +313,13 @@ Panel {
     implicitWidth: (chipLogo.visible ? chipLogo.width + Style.space(6) : 0)
       + (dataButton.hasWindows ? chipWindowsRow.implicitWidth : chipLabel.implicitWidth)
       + (root.dsPeakEnabled ? chipDsLabel.implicitWidth + chipPeakDot.width + Style.space(9) : 0)
-      + Style.space(17)
+      + dataButton.sidePadding * 2
     implicitHeight: Math.max(chipLogo.height, dataButton.hasWindows ? chipWindowsRow.implicitHeight : chipLabel.implicitHeight)
 
     Image {
       id: chipLogo
       anchors.left: parent.left
+      anchors.leftMargin: dataButton.sidePadding
       anchors.verticalCenter: parent.verticalCenter
       width: Style.font.body * 1.15
       height: width
@@ -331,7 +335,7 @@ Panel {
     Row {
       id: chipWindowsRow
       anchors.left: chipLogo.visible ? chipLogo.right : parent.left
-      anchors.leftMargin: chipLogo.visible ? Style.space(6) : 0
+      anchors.leftMargin: chipLogo.visible ? Style.space(6) : dataButton.sidePadding
       anchors.verticalCenter: parent.verticalCenter
       visible: dataButton.hasWindows
       spacing: Style.space(6)
@@ -425,7 +429,7 @@ Panel {
     Text {
       id: chipLabel
       anchors.left: chipLogo.visible ? chipLogo.right : parent.left
-      anchors.leftMargin: chipLogo.visible ? Style.space(6) : 0
+      anchors.leftMargin: chipLogo.visible ? Style.space(6) : dataButton.sidePadding
       anchors.verticalCenter: parent.verticalCenter
       visible: !dataButton.hasWindows
       text: dataButton.chipText
