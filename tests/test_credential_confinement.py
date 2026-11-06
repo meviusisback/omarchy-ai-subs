@@ -737,5 +737,84 @@ class TestProductionTrustDefaults(unittest.TestCase):
         self.assertNotIn(key, buffer.getvalue())
 
 
+class TestFindBwsBinary(ConfinementTestCase):
+    """The pinned-bws lookup holds the binary to credential-file integrity.
+
+    ``_find_bws_binary`` takes no trust parameters (it runs before any trust
+    context exists), so these tests point ``HOME`` at the fixture and patch
+    ``_trusted_dir`` to anchor the chain at the fixture base — the real
+    ``/tmp`` ancestors would otherwise (correctly) refuse the tree.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.home = os.path.join(self.base, "home")
+        os.mkdir(self.home, 0o700)
+        self.tools = os.path.join(self.home, ".hermes", "tools")
+        os.makedirs(self.tools, mode=0o755)
+        os.environ["HOME"] = self.home
+        os.environ.pop("HERMES_HOME", None)
+        real_trusted_dir = fetch_usage._trusted_dir
+        self._patcher = mock.patch.object(
+            fetch_usage, "_trusted_dir",
+            lambda path, **kw: real_trusted_dir(
+                path, ancestor_uids=self.ancestors, trust_root=self.trust_root))
+        self._patcher.start()
+        self.addCleanup(self._patcher.stop)
+
+    def write_bws(self, version="bws-2.0.0-linux-x64", mode=0o755):
+        bindir = os.path.join(self.tools, version)
+        os.makedirs(bindir, mode=0o755, exist_ok=True)
+        binary = os.path.join(bindir, "bws")
+        with open(binary, "w", encoding="utf-8") as fh:
+            fh.write("#!/bin/sh\necho '[]'\n")
+        os.chmod(binary, mode)
+        return binary
+
+    def test_accepts_owned_unwritable_pinned_binary(self):
+        binary = self.write_bws()
+        self.assertEqual(fetch_usage._find_bws_binary(), binary)
+
+    def test_skips_symlinked_binary(self):
+        outside = os.path.join(self.base, "evil-bws")
+        with open(outside, "w", encoding="utf-8") as fh:
+            fh.write("#!/bin/sh\necho '[]'\n")
+        os.chmod(outside, 0o755)
+        linkdir = os.path.join(self.tools, "bws-9.9.9-evil")
+        os.mkdir(linkdir, 0o755)
+        os.symlink(outside, os.path.join(linkdir, "bws"))
+        self.assertIsNone(fetch_usage._find_bws_binary())
+
+    def test_skips_symlinked_parent(self):
+        real = os.path.join(self.base, "realdir")
+        os.mkdir(real, 0o755)
+        binary = os.path.join(real, "bws")
+        with open(binary, "w", encoding="utf-8") as fh:
+            fh.write("#!/bin/sh\necho '[]'\n")
+        os.chmod(binary, 0o755)
+        os.symlink(real, os.path.join(self.tools, "bws-9.9.9-evil"))
+        self.assertIsNone(fetch_usage._find_bws_binary())
+
+    def test_skips_group_writable_binary(self):
+        self.write_bws(mode=0o775)
+        self.assertIsNone(fetch_usage._find_bws_binary())
+
+    def test_skips_untrusted_tools_dir(self):
+        self.write_bws()
+        os.chmod(self.tools, 0o777)
+        self.assertIsNone(fetch_usage._find_bws_binary())
+
+    def test_no_path_fallback(self):
+        # A bws on PATH must never be picked up: only the pinned copy.
+        bindir = os.path.join(self.base, "bin")
+        os.mkdir(bindir, 0o755)
+        fake = os.path.join(bindir, "bws")
+        with open(fake, "w", encoding="utf-8") as fh:
+            fh.write("#!/bin/sh\necho '[]'\n")
+        os.chmod(fake, 0o755)
+        os.environ["PATH"] = bindir + os.pathsep + os.environ.get("PATH", "")
+        self.assertIsNone(fetch_usage._find_bws_binary())
+
+
 if __name__ == "__main__":
     unittest.main()

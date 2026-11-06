@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "meviusisback.ai-subs",
   "name": "AI Subs",
-  "version": "1.4.5",
+  "version": "1.5.0",
   "author": "meviusisback",
   "license": "MIT",
-  "description": "AI subscription usage/balance in the Omarchy bar: OpenCode Go, OpenRouter, Claude Code, Codex, Command Code, DeepSeek, Kimi, NovitaAI, ZAI, Alibaba, Arcee, GitHub Copilot and Cursor — meter bars, credit balances and live reset countdowns.",
+  "description": "AI subscription usage/balance in the Omarchy bar: OpenCode Go, OpenRouter, Claude Code, Codex, Command Code, DeepSeek, Kimi, NovitaAI, ZAI, Alibaba, Arcee, GitHub Copilot and Cursor — meter bars, credit balances and live reset countdowns. Keys come from the Hermes .env file, an optional Bitwarden Secrets Manager project, native configs or OAuth tokens.",
   "kinds": ["bar-widget"],
   "activation": "on-demand",
   "entryPoints": {
@@ -24,10 +24,10 @@
     },
     "schema": [
       { "key": "refreshIntervalSec", "type": "integer", "label": "Refresh interval (seconds)", "min": 30, "max": 3600, "step": 30, "defaultValue": 900 },
-      { "key": "hermesEnvFile", "type": "path", "label": "Hermes .env file", "defaultValue": "~/.hermes/.env", "description": "Provider API keys. Must live inside the Hermes profile directory ($HERMES_HOME \u2014 when it is inside your home \u2014 or ~/.hermes), be a regular single-linked 0600 file owned by you, and not be a symlink \u2014 anything else is refused (reason logged in the shell log)." },
+      { "key": "hermesEnvFile", "type": "path", "label": "Hermes .env file", "defaultValue": "~/.hermes/.env", "description": "Provider API keys. Must live inside the Hermes profile directory ($HERMES_HOME \u2014 when it is inside your home \u2014 or ~/.hermes), be a regular single-linked 0600 file owned by you, and not be a symlink \u2014 anything else is refused (reason logged in the shell log). Keys missing from this file can be resolved from an optional Bitwarden Secrets Manager project (secrets.bitwarden in config.yaml); values in this file always win." },
       { "key": "barDisplay", "type": "enum", "label": "Bar display", "options": ["Icon", "Data"], "defaultValue": "Data", "description": "Icon shows the Sigma glyph; Data shows a compact one-liner for the default sub." },
       { "key": "dsPeakClock", "type": "boolean", "label": "DeepSeek peak clock", "defaultValue": false, "description": "Show the DeepSeek peak/off-peak pricing dot in the bar and the pricing clock row in the panel. Off by default; pure UTC clock, no API key needed." },
-      { "key": "defaultSub", "type": "enum", "label": "Default sub (Data mode)", "options": ["opencode", "openrouter", "claude", "codex", "commandcode", "deepseek", "kimi", "novita", "zai", "alibaba", "arcee", "copilot", "cursor"], "defaultValue": "opencode", "description": "Which subscription the bar shows when Bar display is Data." }
+      { "key": "defaultSub", "type": "enum", "label": "Default sub (Data mode)", "options": ["opencode", "openrouter", "claude", "codex", "deepseek", "kimi", "novita", "zai", "alibaba", "arcee", "commandcode", "copilot", "cursor"], "defaultValue": "opencode", "description": "Which subscription the bar shows when Bar display is Data." }
     ]
   }
 }

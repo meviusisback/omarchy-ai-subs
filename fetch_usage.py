@@ -41,12 +41,15 @@ import json
 import math
 import os
 import re
+import select
 import ssl
 import stat
 import sqlite3
+import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -689,13 +692,33 @@ def _load_cn_holidays():
     cache_path = _expand_home(HOLIDAY_CACHE_FILE)
     cached = {"fetchedAt": 0, "attemptedAt": 0, "days": {}}
     try:
-        if os.path.getsize(cache_path) > HOLIDAY_CACHE_MAX_BYTES:
-            raise OSError("holiday cache oversized")
-        with open(cache_path, "r", encoding="utf-8") as handle:
-            loaded = json.load(handle)
+        # Same treatment as the credential reads: a FIFO planted at the cache
+        # path makes a plain open() block forever (no writer ever comes), and a
+        # symlink would redirect the read. O_NOFOLLOW|O_NONBLOCK + fstat on the
+        # descriptor, size cap checked on the descriptor the bytes come from.
+        # The leaf is pinned by O_NOFOLLOW, but a SYMLINKED PARENT is still
+        # followed — the write path refuses one, so the read must too.
+        r_parent = os.path.dirname(cache_path)
+        p_stat = os.stat(r_parent, follow_symlinks=False) if r_parent else None
+        if p_stat is not None and not (stat.S_ISDIR(p_stat.st_mode)
+                                       and p_stat.st_uid == os.getuid()
+                                       and p_stat.st_mode & 0o022 == 0):
+            raise OSError("holiday cache parent not trusted")
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        fd = os.open(cache_path, flags)
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode) or st.st_size > HOLIDAY_CACHE_MAX_BYTES:
+                raise OSError("holiday cache oversized")
+            raw = os.read(fd, HOLIDAY_CACHE_MAX_BYTES + 1)
+            if len(raw) > HOLIDAY_CACHE_MAX_BYTES:
+                raise OSError("holiday cache oversized")
+            loaded = json.loads(raw.decode("utf-8"))
+        finally:
+            os.close(fd)
         if isinstance(loaded, dict) and isinstance(loaded.get("days"), dict):
             cached = loaded
-    except (OSError, ValueError):
+    except (OSError, ValueError, UnicodeDecodeError):
         pass
     for stamp in ("fetchedAt", "attemptedAt"):
         try:
@@ -727,10 +750,20 @@ def _load_cn_holidays():
         cached["fetchedAt"] = int(time.time())
     try:
         parent = os.path.dirname(cache_path)
-        if parent:
-            os.makedirs(parent, exist_ok=True)
+        if not parent:
+            raise OSError("holiday cache has no parent directory")
+        os.makedirs(parent, exist_ok=True)
+        # Refuse a symlinked or group/other-writable parent: both the temp file
+        # and the atomic replace below would follow it.
+        p_stat = os.stat(parent, follow_symlinks=False)
+        if not (stat.S_ISDIR(p_stat.st_mode) and p_stat.st_uid == os.getuid()
+                and p_stat.st_mode & 0o022 == 0):
+            raise OSError("holiday cache parent not trusted")
         tmp_path = "%s.tmp.%d.%d" % (cache_path, os.getpid(), time.time_ns())
-        with open(tmp_path, "w", encoding="utf-8") as handle:
+        # O_EXCL + 0600: never open a pre-existing file (or a planted symlink)
+        # and keep the temp owner-only for the moment it exists.
+        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(cached, handle)
         os.replace(tmp_path, cache_path)
     except OSError:
@@ -750,19 +783,23 @@ def _normalize_usage(body):
             normalized[window_id] = None
             continue
         try:
-            percent = round(_finite(raw["percent"]), 1) if raw.get("percent") is not None else None
+            percent = round(min(100.0, max(0.0, _finite(raw["percent"]))), 1) if raw.get("percent") is not None else None
         except (TypeError, ValueError):
             percent = None
         normalized[window_id] = {
             "status": raw.get("status") if isinstance(raw.get("status"), str) else None,
             "percent": percent,
-            "resetsAt": raw.get("resetsAt") if isinstance(raw.get("resetsAt"), str) else None,
+            "resetsAt": _normalize_iso_timestamp(raw.get("resetsAt")),
         }
     return normalized
 
 
 def _pct(value):
-    return f"{round(value)}%" if value is not None else "—"
+    if value is None:
+        return "—"
+    # Clamp to 0-100: a hostile or changed-shape response must not render
+    # "1e+08%" in the bar.
+    return f"{round(min(100.0, max(0.0, _finite(value))))}%"
 
 
 def _safe_float(value, default: float = 0.0) -> float:
@@ -781,6 +818,19 @@ def _finite(value, default: float = 0.0) -> float:
     """
     number = _safe_float(value, default)
     return number if math.isfinite(number) else default
+
+
+def _scrub_nonfinite(value):
+    """Recursively replace non-finite floats so the final
+    ``json.dumps(..., allow_nan=False)`` can never raise: bare NaN/Infinity is
+    not valid JSON, and QML's JSON.parse would reject the whole document."""
+    if isinstance(value, float):
+        return value if math.isfinite(value) else 0.0
+    if isinstance(value, dict):
+        return {k: _scrub_nonfinite(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_scrub_nonfinite(v) for v in value]
+    return value
 
 
 _CURRENCY_RE = re.compile(r"^[A-Za-z]{3,5}$")
@@ -863,15 +913,18 @@ def _fetch_openrouter(api_key: str):
         return {"error": "unexpected-response"}
     total = _finite(data["total_credits"])
     used = _finite(data["total_usage"])
-    remaining = max(0.0, total - used)
-    pct_used = (used / total * 100.0) if total > 0 else 0.0
+    # Re-guard the DERIVED values too: two individually finite operands can
+    # still sum or divide to +/-inf (1.8e308 - -1.8e308), and a bare Infinity
+    # in the payload makes QML's JSON.parse reject the WHOLE document.
+    remaining = _finite(max(0.0, total - used))
+    pct_used = _finite(used / total * 100.0) if total > 0 else 0.0
     return {
         "kind": "balance",
         "label": f"${remaining:,.2f}",
         "value": round(remaining, 2),
         "used": round(used, 2),
         "total": round(total, 2),
-        "ratio": round(pct_used / 100.0, 4) if total > 0 else None,
+        "ratio": round(_finite(pct_used) / 100.0, 4) if total > 0 else None,
         "detail": f"${remaining:,.2f} left of ${total:,.2f} ({pct_used:.0f}% used)",
     }
 
@@ -882,12 +935,13 @@ def _fetch_deepseek(api_key: str):
         return {"error": "unexpected-response"}
     total = 0.0
     currency = "USD"
-    for info in infos:
+    for info in infos[:64]:  # the response is size-capped; bound the loop anyway
         if not isinstance(info, dict):
             continue
         currency = _safe_currency(info.get("currency"), currency)
-        total += _finite(info.get("total_balance"))
-    value = round(total, 2)
+        # Re-guard the accumulator: finite addends can still overflow to inf.
+        total = _finite(total + _finite(info.get("total_balance")))
+    value = round(_finite(total), 2)
     return {
         "kind": "balance",
         "label": f"{value:,.2f} {currency}",
@@ -1115,13 +1169,27 @@ def _fetch_collector(agent_id):
     path = os.path.expanduser(OMARCHY_USAGE_DIR + "/" + agent_id + ".json")
     if not os.path.isfile(path):
         return {"error": "no-usage-record"}
-    if os.path.getsize(path) > _MAX_NATIVE_BYTES:
-        return {"error": "file-too-large"}
+    # Descriptor-verified read: the record is not a credential, but a symlink
+    # swapped in at `path` (or a file growing between stat and read) must not
+    # redirect or unbound this read. O_NOFOLLOW|O_NONBLOCK + fstat, then a hard
+    # byte cap on the bytes actually read.
     try:
-        with open(path, "r", encoding="utf-8") as fh:
-            record = json.load(fh)
-    except (OSError, json.JSONDecodeError, ValueError):
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        fd = os.open(path, flags)
+    except OSError:
+        return {"error": "no-usage-record"}
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > _MAX_NATIVE_BYTES:
+            return {"error": "file-too-large"}
+        raw = os.read(fd, _MAX_NATIVE_BYTES + 1)
+        if len(raw) > _MAX_NATIVE_BYTES:
+            return {"error": "file-too-large"}
+        record = json.loads(raw.decode("utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError):
         return {"error": "unexpected-response"}
+    finally:
+        os.close(fd)
     limits = record.get("limits") if isinstance(record, dict) else None
     windows = []
     for entry in limits if isinstance(limits, list) else []:
@@ -1133,7 +1201,7 @@ def _fetch_collector(agent_id):
             # Scale to a real percentage, or Claude/Codex read 100x too low
             # (71% of the weekly limit rendering as "0.7%").
             raw_pct = _finite(entry["percent"])
-            percent = round(raw_pct * 100.0, 1) if raw_pct <= 1.0 else round(raw_pct, 1)
+            percent = round(min(100.0, max(0.0, raw_pct * 100.0)), 1) if raw_pct <= 1.0 else round(min(100.0, max(0.0, raw_pct)), 1)
         except (TypeError, ValueError):
             continue
         short = _short_window_label(entry.get("title") or entry.get("label"))
@@ -1276,22 +1344,26 @@ def _fetch_cursor(token: SentinelToken):
     if not isinstance(plan_usage, dict):
         return {"error": "no-usage-data"}
 
-    total_cents = plan_usage.get("totalSpend", 0)
-    limit_cents = plan_usage.get("limit", 0)
-    included_cents = plan_usage.get("includedSpend", 0)
+    # json.loads accepts bare NaN/Infinity literals, and a hostile or
+    # changed-shape response must not ship them into the panel payload.
+    total_cents = _finite(plan_usage.get("totalSpend", 0))
+    limit_cents = _finite(plan_usage.get("limit", 0))
+    included_cents = _finite(plan_usage.get("includedSpend", 0))
 
     if limit_cents and limit_cents > 0:
         total_usd = total_cents / 100.0
         limit_usd = limit_cents / 100.0
-        pct = round(total_cents / limit_cents * 100.0, 1) if limit_cents else 0
-        remaining = max(0.0, limit_usd - total_usd)
+        # Derived values re-guarded and clamped: two finite operands can still
+        # divide or subtract to a non-finite result (1e308 / 1e-308).
+        pct = round(min(100.0, max(0.0, _finite(total_cents / limit_cents * 100.0))), 1)
+        remaining = _finite(max(0.0, limit_usd - total_usd))
         return {
             "kind": "balance",
             "label": f"${remaining:,.2f} left",
             "value": round(remaining, 2),
             "used": round(total_usd, 2),
             "total": round(limit_usd, 2),
-            "ratio": round(pct / 100.0, 4),
+            "ratio": round(_finite(pct) / 100.0, 4),
             "detail": f"${total_usd:,.2f} of ${limit_usd:,.2f} used ({pct:.0f}%)",
         }
 
@@ -1345,7 +1417,7 @@ _ENV_DENYLIST = frozenset({
     "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT",
     "PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP",
     "XDG_CONFIG_HOME", "XDG_RUNTIME_DIR", "HERMES_HOME", "TMPDIR",
-    "SSL_CERT_FILE", "SSL_CERT_DIR", "SSLKEYLOGFILE",
+    "SSL_CERT_FILE", "SSL_CERT_DIR", "SSLKEYLOGFILE", "OPENSSL_CONF",
     "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
     "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
     "http_proxy", "https_proxy", "all_proxy", "no_proxy",
@@ -1408,6 +1480,276 @@ def load_hermes_dotenv(path: str, roots=None, max_bytes: int = MAX_CREDENTIAL_BY
     return True
 
 
+# --------------------------------------------------------------------------- #
+# Bitwarden Secrets Manager fallback — provider keys that left the .env
+# --------------------------------------------------------------------------- #
+def _read_bitwarden_config(config_path: str) -> dict[str, str]:
+    """Flat ``secrets.bitwarden`` scalars from a Hermes ``config.yaml``.
+
+    Deliberately a YAML subset (stdlib-only, no PyYAML): the top-level
+    ``secrets:`` block, its ``bitwarden:`` child, then only the scalar keys at
+    the next indent — nested maps such as ``encrypted_cache:`` are skipped, so
+    their ``enabled:`` can never be mistaken for the integration switch.
+    Returns ``{}`` when the file is missing, refused or has no such block.
+    """
+    try:
+        text = read_confined_text(config_path, hermes_env_roots(), MAX_CREDENTIAL_BYTES)
+    except CredentialFileError:
+        return {}
+    cfg: dict[str, str] = {}
+    in_secrets = in_bitwarden = False
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip())
+        if indent == 0:
+            in_secrets = stripped == "secrets:"
+            in_bitwarden = False
+            continue
+        if in_secrets and indent == 2:
+            in_bitwarden = stripped == "bitwarden:"
+            continue
+        if in_bitwarden and indent == 4 and ":" in stripped:
+            key, _, value = stripped.partition(":")
+            key = key.strip()
+            value = value.strip()
+            # A trailing "# comment" belongs to the line, not the value — for
+            # quoted and bare scalars alike (the dotenv parser splits on ' #').
+            if value and value[0] in "\"'":
+                quote = value[0]
+                end = value.find(quote, 1)
+                if end != -1:
+                    value = value[:end + 1] + re.split(
+                        r"\s+#", value[end + 1:], maxsplit=1)[0]
+            else:
+                value = re.split(r"\s+#", value, maxsplit=1)[0].rstrip()
+            value = value.strip().strip("'\"")
+            if key in cfg:
+                # Ambiguous block: fail closed instead of letting a repeated
+                # key decide where the bootstrap token is sent.
+                print("hermes-usage: duplicate key in secrets.bitwarden — "
+                      "ignoring the block", file=sys.stderr)
+                return {}
+            cfg[key] = value
+    return cfg
+
+
+_UUID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+
+
+def _valid_bitwarden_url(url: str) -> bool:
+    """https, a real host, no userinfo, no whitespace/control characters.
+
+    Only this shape is exported as BWS_SERVER_URL: anything else (cleartext
+    http, an embedded credential, a newline that would break the env block)
+    could steer BWS_ACCESS_TOKEN to a chosen endpoint.
+    """
+    if any(ord(ch) <= 0x20 or ord(ch) == 0x7F for ch in url):
+        return False
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:
+        return False
+    return bool(parts.scheme == "https" and parts.hostname
+                and not parts.username and not parts.password)
+
+
+def _find_bws_binary() -> str | None:
+    """The Hermes-PM-pinned ``bws``, integrity-checked — no PATH fallback.
+
+    The pinned copy lives under ``~/.hermes/tools/bws-<version>-*/bws``.  It
+    receives BWS_ACCESS_TOKEN (which unlocks every provider key in the
+    project), so it is held to the same integrity bar as a credential file:
+    the tools dir must be a trusted dir (ours, no group/other write, trusted
+    chain), the ``bws-*`` parent and the binary itself must not be symlinks,
+    and the binary must be a regular file owned by us with no group/other
+    write bits.  Anything else is skipped, and when no pinned copy qualifies
+    the lookup returns None: PATH is inherited from the session, and any
+    directory earlier in it could substitute a different ``bws`` — which
+    would then receive the token.  ``HERMES_HOME`` only widens the search
+    when it resolves strictly inside the home directory (same rule as
+    hermes_env_roots).
+    """
+    home = _home_dir()
+    uid = os.getuid()
+    directories: list[str] = []
+    hermes_home = os.environ.get("HERMES_HOME", "")
+    if hermes_home and home:
+        try:
+            expanded_real = os.path.realpath(_expand_home(hermes_home))
+            home_real = os.path.realpath(home)
+            if expanded_real.startswith(home_real + os.sep):
+                directories.append(os.path.join(expanded_real, "tools"))
+        except (OSError, ValueError):
+            pass
+    if home:
+        directories.append(os.path.join(os.path.realpath(home), ".hermes", "tools"))
+    for directory in directories:
+        trusted = _trusted_dir(directory)
+        if trusted is None:
+            continue
+        try:
+            entries = sorted(Path(trusted).glob("bws-*/bws"))
+        except OSError:
+            continue
+        for candidate in entries:
+            try:
+                # No symlink at the binary or its bws-* parent: is_file()
+                # follows links, so check first.
+                if os.path.islink(candidate) or os.path.islink(candidate.parent):
+                    continue
+                st = os.stat(candidate)
+            except OSError:
+                continue
+            if (stat.S_ISREG(st.st_mode) and st.st_uid == uid
+                    and st.st_mode & 0o022 == 0
+                    and os.access(candidate, os.X_OK)):
+                return str(candidate)
+    return None
+
+
+def load_bitwarden_provider_keys(env_dir: str, wanted: set[str]) -> bool:
+    """Fill in *wanted* keys the ``.env`` did not supply, from Bitwarden.
+
+    Hermes keeps provider keys in Secrets Manager and leaves only the
+    bootstrap token (``BWS_ACCESS_TOKEN``) in the ``.env``, so a widget that
+    reads only that file now sees every API-key provider as ``no-key``.  This
+    repeats the fetch Hermes itself performs at startup (``bws secret list
+    <project>``), restricted to the names this script actually asks for and
+    never overriding a value the ``.env`` already provided.  Every failure
+    path prints one line to stderr and leaves the provider list untouched: a
+    user with Bitwarden disabled pays no network cost and sees the same
+    ``no-key`` behaviour as before.
+    """
+    missing = {name for name in wanted if name and name not in os.environ}
+    if not missing:
+        return True
+    cfg = _read_bitwarden_config(os.path.join(env_dir, "config.yaml"))
+    if str(cfg.get("enabled", "")).lower() not in {"true", "yes", "1"}:
+        return False
+    # access_token_env may only name a Bitwarden-shaped token variable: an
+    # arbitrary name would let config decide WHICH of the user's credentials
+    # the child carries (e.g. GITHUB_TOKEN), so anything else falls back to
+    # the canonical name.
+    token_env = (cfg.get("access_token_env") or "BWS_ACCESS_TOKEN").strip()
+    if "bws" not in token_env.lower() or not _ENV_NAME_RE.match(token_env):
+        print("hermes-usage: secrets.bitwarden.access_token_env must name a "
+              "Bitwarden token variable — using BWS_ACCESS_TOKEN",
+              file=sys.stderr)
+        token_env = "BWS_ACCESS_TOKEN"
+    token = os.environ.get(token_env, "").strip()
+    project = (cfg.get("project_id") or "").strip()
+    if not token or not project:
+        return False
+    if not _UUID_RE.match(project):
+        # Also forecloses a leading-dash value reaching bws as a CLI flag.
+        print("hermes-usage: secrets.bitwarden.project_id is not a UUID — "
+              "ignoring the vault", file=sys.stderr)
+        return False
+    binary = _find_bws_binary()
+    if not binary:
+        print("hermes-usage: bws binary not found — provider keys stay missing",
+              file=sys.stderr)
+        return False
+    # Minimal child environment: PATH/HOME for bws itself plus the one token
+    # it authenticates with — never dict(os.environ), which would hand every
+    # other credential in the session to a child that needs exactly one.
+    server_url = (cfg.get("server_url") or "").strip()
+    if server_url and not _valid_bitwarden_url(server_url):
+        print("hermes-usage: secrets.bitwarden.server_url must be an https URL "
+              "without embedded credentials — ignoring it", file=sys.stderr)
+        server_url = ""
+    child_env = {"PATH": os.environ.get("PATH", ""),
+                 "HOME": os.environ.get("HOME", ""),
+                 "BWS_ACCESS_TOKEN": token}
+    if server_url:
+        child_env["BWS_SERVER_URL"] = server_url
+    try:
+        proc = subprocess.Popen([binary, "secret", "list", project],
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                env=child_env)
+    except OSError as exc:
+        print(f"hermes-usage: bitwarden fetch failed: {exc}", file=sys.stderr)
+        return False
+    # Bounded on BOTH axes: a byte cap (capture_output would buffer whatever
+    # the endpoint streams) and a wall-clock deadline (a hung child would stall
+    # the whole widget refresh). Either breach degrades to "no key".
+    deadline = time.monotonic() + 25.0
+    chunks: list[bytes] = []
+    total = 0
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("bws timed out")
+            ready, _, _ = select.select([proc.stdout], [], [], min(remaining, 1.0))
+            if not ready:
+                continue
+            chunk = os.read(proc.stdout.fileno(), 65536)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > MAX_CREDENTIAL_BYTES:
+                raise ValueError("bws output exceeds cap")
+            chunks.append(chunk)
+    except (OSError, ValueError, TimeoutError) as exc:
+        proc.kill()
+        with contextlib.suppress(OSError):
+            proc.wait(timeout=5)
+        with contextlib.suppress(OSError):
+            proc.stdout.close()
+        print(f"hermes-usage: bitwarden fetch failed: {exc}", file=sys.stderr)
+        return False
+    with contextlib.suppress(OSError):
+        proc.stdout.close()
+    try:
+        returncode = proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        # bws produced its output and then lingered: kill and degrade. Without
+        # this the exception escapes main() and the WHOLE fetch dies with a
+        # traceback (no document for the panel), leaving the child running.
+        proc.kill()
+        with contextlib.suppress(OSError):
+            proc.wait(timeout=5)
+        print("hermes-usage: bws did not exit after output — killed",
+              file=sys.stderr)
+        return False
+    if returncode != 0:
+        print("hermes-usage: bws exited non-zero", file=sys.stderr)
+        return False
+    try:
+        secrets = json.loads(b"".join(chunks).decode("utf-8"))
+    except (ValueError, UnicodeDecodeError, TypeError):
+        print("hermes-usage: bws returned non-JSON output", file=sys.stderr)
+        return False
+    applied = 0
+    for entry in secrets if isinstance(secrets, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        key = str(entry.get("key", "")).strip()
+        value = entry.get("value")
+        if key not in missing or key in _ENV_DENYLIST or not _ENV_NAME_RE.match(key):
+            continue
+        if not isinstance(value, str) or not value.strip():
+            continue
+        # Strip, unlike Hermes' own apply: a secret pasted with a trailing
+        # newline survives header auth but breaks endpoints built into a URL.
+        clean = value.strip()
+        if "\x00" in clean:
+            # os.environ rejects NUL (ValueError) — load_hermes_dotenv skips
+            # these at 1391; one bad secret must not kill the whole fetch.
+            continue
+        os.environ[key] = clean
+        applied += 1
+    if applied:
+        print(f"hermes-usage: resolved {applied} provider key(s) from Bitwarden",
+              file=sys.stderr)
+    return bool(applied)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Fetch Hermes provider usage/balance as JSON.")
     parser.add_argument("--env", default=_expand_home("~/.hermes/.env"),
@@ -1422,6 +1764,12 @@ def main() -> None:
     args = parser.parse_args()
 
     load_hermes_dotenv(args.env)
+    # Provider keys may live in Bitwarden Secrets Manager instead of the .env
+    # file (Hermes itself fetches them from there at startup).  No-op for
+    # users without the vault configured.
+    wanted = {name for spec in PROVIDER_SPECS for name in spec.get("key_envs", [])}
+    load_bitwarden_provider_keys(
+        os.path.dirname(os.path.abspath(_expand_home(args.env))), wanted)
 
     def run(spec):
         rec = {
@@ -1436,7 +1784,7 @@ def main() -> None:
             try:
                 data = spec["fetch"]()
             except Exception as exc:  # noqa: BLE001 - surfaced to the UI as text
-                rec["error"] = _transport_error(exc)
+                rec["error"] = _scrub_error(_transport_error(exc))
                 rec["configured"] = False
                 return rec
             rec["configured"] = "error" not in data
@@ -1478,7 +1826,7 @@ def main() -> None:
         try:
             rec.update(spec["fetch"](key))
         except Exception as exc:  # noqa: BLE001 - surfaced to the UI as text
-            rec["error"] = _transport_error(exc)
+            rec["error"] = _scrub_error(_transport_error(exc))
         return rec
 
     results = {}
@@ -1493,11 +1841,23 @@ def main() -> None:
         holiday_days, holiday_years = [], []
     else:
         holiday_days, holiday_years = _load_cn_holidays()
-    print(json.dumps(
-        {"providers": providers, "generatedAt": int(time.time()),
-         "cnHolidays": holiday_days, "cnHolidaysYears": holiday_years},
-        ensure_ascii=False,
-    ))
+    document = {"providers": providers, "generatedAt": int(time.time()),
+                "cnHolidays": holiday_days, "cnHolidaysYears": holiday_years}
+    # Every provider guards its own numbers (see _finite); this pass proves the
+    # invariant before the payload leaves the process, and allow_nan=False
+    # turns any future miss into a loud local failure here instead of a
+    # document the panel's JSON.parse rejects wholesale.
+    document = _scrub_nonfinite(document)
+    try:
+        payload = json.dumps(document, ensure_ascii=False, allow_nan=False)
+    except ValueError:
+        payload = json.dumps(
+            {"providers": [], "generatedAt": int(time.time()),
+             "cnHolidays": [], "cnHolidaysYears": [],
+             "error": "invalid-payload"},
+            ensure_ascii=False,
+        )
+    print(payload)
 
 
 if __name__ == "__main__":
