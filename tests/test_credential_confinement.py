@@ -627,7 +627,8 @@ class TestProductionTrustDefaults(unittest.TestCase):
 
     def test_gh_hosts_reads_per_account_token_under_users(self):
         # Recent gh versions keep a per-account map under users: — nested
-        # tokens still belong to github.com and must be usable.
+        # tokens still belong to github.com, and the account named by the
+        # block's own `user:` key is the one gh considers active.
         self.write(".config/gh/hosts.yml",
                    "github.com:\n"
                    "    user: alberto\n"
@@ -639,7 +640,7 @@ class TestProductionTrustDefaults(unittest.TestCase):
                    "            oauth_token: gho_account_two\n")
         token = fetch_usage._read_github_oauth_token()
         self.assertIsNotNone(token)
-        self.assertIn(token.value, ("gho_account_one", "gho_account_two"))
+        self.assertEqual(token.value, "gho_account_one")
 
     def test_gh_hosts_ignores_another_hosts_users_map(self):
         self.write(".config/gh/hosts.yml",
@@ -660,6 +661,39 @@ class TestProductionTrustDefaults(unittest.TestCase):
                    "bitbucket.example.com:\n"
                    "    oauth_token: atlassian_looking_token\n")
         self.assertIsNone(fetch_usage._read_github_oauth_token())
+
+    def test_enterprise_only_token_attempts_no_copilot_request(self):
+        # The end-to-end contract the panel relies on: with no github.com
+        # credential, Copilot reports no-token and zero requests are made.
+        self.write(".config/gh/hosts.yml",
+                   "ghe.corp.example.com:\n"
+                   "    user: alberto\n"
+                   "    oauth_token: gho_ENTERPRISE_ONLY\n")
+        self.assertIsNone(fetch_usage._read_github_oauth_token())
+
+        attempted = []
+
+        def refuse(request, *args, **kwargs):
+            attempted.append(getattr(request, "full_url", request))
+            raise AssertionError("network request attempted without a token")
+
+        out = io.StringIO()
+        copilot_spec = next(s for s in fetch_usage.PROVIDER_SPECS
+                            if s["id"] == "copilot")
+        with mock.patch.object(fetch_usage, "_OPENER") as opener, \
+                mock.patch.object(fetch_usage, "PROVIDER_SPECS", [copilot_spec]), \
+                mock.patch.object(sys, "argv",
+                                  ["fetch_usage.py", "--env", "/dev/null",
+                                   "--no-holidays"]), \
+                mock.patch.object(sys, "stdout", out):
+            opener.open.side_effect = refuse
+            fetch_usage.main()
+
+        self.assertEqual(attempted, [])
+        payload = json.loads(out.getvalue())
+        copilot = {p["id"]: p for p in payload["providers"]}["copilot"]
+        self.assertIs(copilot["configured"], False)
+        self.assertEqual(copilot["error"], "no-token")
 
     def test_cursor_sqlite_reader_reads_the_token(self):
         db_path = os.path.join(self.base, ".cursor", "state.vscdb")
@@ -886,6 +920,103 @@ class TestFindBwsBinary(ConfinementTestCase):
         os.chmod(fake, 0o755)
         os.environ["PATH"] = bindir + os.pathsep + os.environ.get("PATH", "")
         self.assertIsNone(fetch_usage._find_bws_binary())
+
+
+class TestGhHostsTokenParsing(unittest.TestCase):
+    """Hermetic coverage for ``_gh_hosts_token()``.
+
+    The function is pure string work, so these tests need no filesystem and
+    cannot be skipped by an untrusted ``$HOME``: the guarantee the marketplace
+    verification asked for (github.com tokens only) is exercised here even in an
+    environment where ``TestProductionTrustDefaults`` skips loudly.
+    """
+
+    def parse(self, text):
+        return fetch_usage._gh_hosts_token(text)
+
+    def test_reads_the_github_com_token_when_an_enterprise_host_comes_first(self):
+        text = ("ghe.corp.example.com:\n    user: alberto\n"
+                "    oauth_token: gho_ENTERPRISE_SECRET\n"
+                "github.com:\n    user: alberto\n    oauth_token: gho_personal\n")
+        self.assertEqual(self.parse(text), "gho_personal")
+
+    def test_refuses_a_file_with_no_github_com_host(self):
+        text = "ghe.corp.example.com:\n    oauth_token: gho_ENTERPRISE_ONLY\n"
+        self.assertIsNone(self.parse(text))
+
+    def test_prefers_the_account_named_by_the_blocks_user_key(self):
+        text = ("github.com:\n"
+                "    user: work-account\n"
+                "    users:\n"
+                "        alberto:\n            oauth_token: gho_alberto\n"
+                "        work-account:\n            oauth_token: gho_work\n")
+        self.assertEqual(self.parse(text), "gho_work")
+
+    def test_falls_back_to_the_first_account_without_a_user_key(self):
+        text = ("github.com:\n"
+                "    users:\n"
+                "        alberto:\n            oauth_token: gho_alberto\n"
+                "        work-account:\n            oauth_token: gho_work\n")
+        self.assertEqual(self.parse(text), "gho_alberto")
+
+    def test_ignores_another_hosts_users_map(self):
+        text = ("ghe.corp.example.com:\n"
+                "    users:\n"
+                "        alberto:\n            oauth_token: gho_ENTERPRISE_NESTED\n"
+                "github.com:\n    oauth_token: gho_personal\n")
+        self.assertEqual(self.parse(text), "gho_personal")
+
+    def test_column_zero_line_without_a_colon_clears_the_host(self):
+        # A malformed header must not inherit the host above it.
+        text = ("github.com:\n"
+                "ghe.corp.example.com\n"
+                "    oauth_token: gho_ENTERPRISE_SECRET\n")
+        self.assertIsNone(self.parse(text))
+
+    def test_document_boundary_clears_the_host(self):
+        text = ("github.com:\n    user: alberto\n---\n"
+                "    oauth_token: gho_OTHER_DOCUMENT\n")
+        self.assertIsNone(self.parse(text))
+
+    def test_orphan_token_above_any_host_is_ignored(self):
+        self.assertIsNone(self.parse("    oauth_token: gho_orphan\ngithub.com:\n"))
+
+    def test_duplicate_host_block_is_last_wins(self):
+        text = ("github.com:\n    oauth_token: gho_stale\n"
+                "github.com:\n    oauth_token: gho_current\n")
+        self.assertEqual(self.parse(text), "gho_current")
+
+    def test_handles_crlf_quoted_keys_and_empty_then_valid_values(self):
+        cases = {
+            "crlf": "github.com:\r\n    oauth_token: gho_x\r\n",
+            "quoted": "\"github.com\":\n    oauth_token: \"gho_x\"\n",
+            "empty then valid":
+                "github.com:\n    oauth_token:\n    oauth_token: gho_x\n",
+        }
+        for shape, text in cases.items():
+            with self.subTest(shape=shape):
+                self.assertEqual(self.parse(text), "gho_x")
+
+    def test_tab_indented_host_key_is_declined(self):
+        # Not valid YAML: fail closed rather than guess the host.
+        self.assertIsNone(self.parse("\tgithub.com:\n\t\toauth_token: gho_tabbed\n"))
+
+    def test_flow_mapping_is_declined(self):
+        # gh writes block style; a flow-style entry yields no token rather than
+        # a host we cannot attribute.
+        self.assertIsNone(self.parse("github.com: {oauth_token: gho_flow}\n"))
+
+    def test_copilot_endpoint_host_matches_the_scoped_host(self):
+        # The guarantee depends on the token's scoped host being the endpoint's
+        # host or its parent domain: gh keys `github.com`, the API answers on
+        # `api.github.com`. A change to either side must fail here.
+        from urllib.parse import urlsplit
+        endpoint_host = urlsplit(fetch_usage.COPILOT_USER_URL).hostname or ""
+        scoped_host = fetch_usage.GH_API_HOST
+        self.assertTrue(
+            endpoint_host == scoped_host
+            or endpoint_host.endswith("." + scoped_host),
+            f"{endpoint_host} is not {scoped_host} or a subdomain of it")
 
 
 if __name__ == "__main__":
