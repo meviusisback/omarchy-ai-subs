@@ -464,9 +464,109 @@ def _read_oauth_token(file_path: str, key_path: list[str],
     return None
 
 
+GH_API_HOST = "github.com"
+
+
+def _gh_hosts_token(raw: str, host: str = GH_API_HOST) -> str | None:
+    """The ``oauth_token`` that ``gh`` stored for *host* in ``hosts.yml``.
+
+    ``hosts.yml`` holds one top-level block per authenticated host; inside a
+    block the token sits either directly under ``oauth_token:`` or, once ``gh``
+    knows more than one account for that host, under a ``users:`` map keyed by
+    account name.  Only the requested host's token qualifies: this reader feeds
+    ``https://api.github.com`` and nothing else, so handing it another host's
+    credential (a GitHub Enterprise install, for instance) would disclose that
+    token to an origin it was never issued for.  Within a multi-account block the
+    account named by the block's own ``user:`` key wins; without one, the first
+    account in file order is used.
+
+    Fail-closed rules, because a declined token costs a Copilot card and a
+    wrongly-attributed one costs a credential: a non-comment line at column 0 that
+    is not ``key: value`` and a YAML document boundary both end the current host's
+    attribution (a malformed header must not inherit the host above it), a later
+    block for the same host replaces the earlier one as a YAML parser would, and
+    anything unreadable yields ``None`` rather than a guess at whichever token the
+    file happens to list first.  Inside one block the first non-empty value for a
+    key wins, as ``gh`` writes each key once.
+    """
+    blocks: dict[str, dict[str, object]] = {}
+    current_host = None
+    stack: list[tuple[int, str]] = []
+
+    for raw_line in raw.splitlines():
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped in ("---", "..."):
+            # New YAML document: no host attribution carries over.
+            current_host = None
+            stack = []
+            continue
+        indent = len(raw_line) - len(raw_line.lstrip(" \t"))
+        key, sep, value = stripped.partition(":")
+        if not sep:
+            # Not a mapping entry.  At column 0 it would otherwise be read as
+            # part of the previous host's block.
+            if indent == 0:
+                current_host = None
+                stack = []
+            continue
+        key = key.strip().strip("\"'")
+        value = value.strip().strip("\"'")
+        if indent == 0:
+            current_host = key
+            stack = []
+            # A repeated host block supersedes the earlier one, as a YAML
+            # parser would resolve it.
+            blocks[key] = {"token": "", "user": "", "users": {}}
+            continue
+        if current_host is None:
+            continue
+        block = blocks[current_host]
+        while stack and stack[-1][0] >= indent:
+            stack.pop()
+        stack.append((indent, key))
+        parent = stack[:-1]
+        users_indent = next((depth for depth, name in parent if name == "users"), None)
+        if key == "user" and value and len(stack) == 1 and not block["user"]:
+            # Only the block's own `user:` counts: a nested one belongs to a
+            # sub-map and must not reselect the active account.  First value
+            # wins, like every other key in the block.
+            block["user"] = value
+        elif key == "oauth_token" and value:
+            if users_indent is not None:
+                # Nested under users: attribute the token to the account whose
+                # block it sits in, never to the block above the map.
+                accounts = [name for depth, name in parent if depth > users_indent]
+                account = accounts[0] if accounts else ""
+                if account and account not in block["users"]:
+                    block["users"][account] = value
+            elif not block["token"]:
+                block["token"] = value
+
+    block = blocks.get(host)
+    if block is None:
+        return None
+    token = block["token"]
+    if token:
+        return token
+    users = block["users"]
+    active = block["user"]
+    if active and users.get(active):
+        return users[active]
+    for account_token in users.values():
+        return account_token
+    return None
+
+
 def _read_github_oauth_token() -> SentinelToken | None:
-    """Read a GitHub OAuth token from gh CLI config or Copilot editor config."""
-    # Priority 1: GITHUB_TOKEN env var
+    """Read a GitHub OAuth token for calls to the public GitHub API.
+
+    Order: ``GITHUB_TOKEN`` in the environment (trusted as a github.com
+    credential — its origin cannot be checked), then the ``github.com`` entry of
+    the gh CLI ``hosts.yml``, then ``apps.json``.  A token gh stored for another
+    host is declined, not repurposed.
+    """
     env_token = os.environ.get("GITHUB_TOKEN", "").strip()
     if env_token:
         return SentinelToken(env_token)
@@ -477,16 +577,12 @@ def _read_github_oauth_token() -> SentinelToken | None:
         raw = read_confined_text(gh_config, [gh_dir])
     except CredentialFileError:
         raw = ""
-    for line in raw.splitlines():
-        line = line.strip()
-        if line.startswith("oauth_token:"):
-            _, _, val = line.partition(":")
-            val = val.strip().strip("\"'")
-            if val:
-                return SentinelToken(val)
+    gh_token = _gh_hosts_token(raw)
+    if gh_token:
+        return SentinelToken(gh_token)
 
     apps_json = _expand_home("~/.config/github-copilot/apps.json")
-    token = _read_oauth_token(apps_json, ["github.com", "oauth_token"],
+    token = _read_oauth_token(apps_json, [GH_API_HOST, "oauth_token"],
                               os.path.dirname(apps_json))
     if token:
         return token
