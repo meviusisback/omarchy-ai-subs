@@ -985,6 +985,17 @@ class TestGhHostsTokenParsing(unittest.TestCase):
                 "    meta:\n        user: bob\n")
         self.assertEqual(self.parse(text), "gho_alice")
 
+    def test_a_repeated_user_key_keeps_the_first_value(self):
+        # Every key inside one block is first-wins, `user:` included, so the
+        # docstring's rule holds literally.
+        text = ("github.com:\n"
+                "    user: alice\n"
+                "    user: bob\n"
+                "    users:\n"
+                "        alice:\n            oauth_token: gho_alice\n"
+                "        bob:\n            oauth_token: gho_bob\n")
+        self.assertEqual(self.parse(text), "gho_alice")
+
     def test_falls_back_to_the_first_account_without_a_user_key(self):
         text = ("github.com:\n"
                 "    users:\n"

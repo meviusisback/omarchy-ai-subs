@@ -138,7 +138,7 @@ After that the fetcher resolves whatever key the `.env` file does not have by ru
 
 `fetch_usage.py` queries each vendor's own usage/balance endpoint in parallel and emits one JSON document; `Panel.qml` renders the meters, balances and countdowns from it. Credential sources, in order: the keys in the Hermes `.env` you point at with `hermesEnvFile` (loaded into the environment, so they win over same-named exported variables) → Bitwarden Secrets Manager when enabled (fills only what is still missing; off by default, zero extra requests when off) → provider-native files (`~/.deepseek/config.toml`, `~/.kimi-code/config.toml`, the Copilot token file, `GITHUB_TOKEN`, or the `github.com` entry of `~/.config/gh/hosts.yml` — a token stored for another host is declined rather than sent to the public API — Cursor's local SQLite state). No API keys, balances or usage data ever leave your machine except to the vendors' own API endpoints, the Bitwarden Secrets Manager API when that integration is on (and Nager.Date for the holiday list when the pricing clock is on); redirects are followed only within the same origin, so a key is never forwarded to another host or downgraded to plaintext.
 
-Verify with `python3 -m unittest discover -s tests` — 104 tests, hermetic.
+Verify with `python3 -m unittest discover -s tests` — 105 tests, hermetic.
 
 ## Removal
 

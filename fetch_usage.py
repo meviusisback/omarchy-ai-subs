@@ -481,8 +481,8 @@ def _gh_hosts_token(raw: str, host: str = GH_API_HOST) -> str | None:
     account in file order is used.
 
     Fail-closed rules, because a declined token costs a Copilot card and a
-    wrongly-attributed one costs a credential: a line at column 0 that is not
-    ``key: value`` and a YAML document boundary both end the current host's
+    wrongly-attributed one costs a credential: a non-comment line at column 0 that
+    is not ``key: value`` and a YAML document boundary both end the current host's
     attribution (a malformed header must not inherit the host above it), a later
     block for the same host replaces the earlier one as a YAML parser would, and
     anything unreadable yields ``None`` rather than a guess at whichever token the
@@ -528,9 +528,10 @@ def _gh_hosts_token(raw: str, host: str = GH_API_HOST) -> str | None:
         stack.append((indent, key))
         parent = stack[:-1]
         users_indent = next((depth for depth, name in parent if name == "users"), None)
-        if key == "user" and value and len(stack) == 1:
+        if key == "user" and value and len(stack) == 1 and not block["user"]:
             # Only the block's own `user:` counts: a nested one belongs to a
-            # sub-map and must not reselect the active account.
+            # sub-map and must not reselect the active account.  First value
+            # wins, like every other key in the block.
             block["user"] = value
         elif key == "oauth_token" and value:
             if users_indent is not None:
