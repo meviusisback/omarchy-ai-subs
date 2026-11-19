@@ -464,6 +464,41 @@ def _read_oauth_token(file_path: str, key_path: list[str],
     return None
 
 
+GH_API_HOST = "github.com"
+
+
+def _gh_hosts_token(raw: str, host: str = GH_API_HOST) -> str | None:
+    """The ``oauth_token`` that ``gh`` stored for *host* in ``hosts.yml``.
+
+    ``hosts.yml`` holds one top-level block per authenticated host; inside a
+    block the token sits either directly under ``oauth_token:`` or, once ``gh``
+    knows more than one account for that host, under a ``users:`` map.  Only the
+    requested host's token qualifies: this reader feeds ``https://api.github.com``
+    and nothing else, so handing it another host's credential (a GitHub
+    Enterprise install, for instance) would disclose that token to an origin it
+    was never issued for.  Anything unparseable yields ``None`` — a declined
+    token, never a guess at whichever one the file happens to list first.
+    """
+    current_host = None
+    for raw_line in raw.splitlines():
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(raw_line) - len(raw_line.lstrip(" \t"))
+        key, sep, value = stripped.partition(":")
+        if not sep:
+            continue
+        if indent == 0:
+            current_host = key.strip().strip("\"'")
+            continue
+        if current_host != host or key.strip().strip("\"'") != "oauth_token":
+            continue
+        token = value.strip().strip("\"'")
+        if token:
+            return token
+    return None
+
+
 def _read_github_oauth_token() -> SentinelToken | None:
     """Read a GitHub OAuth token from gh CLI config or Copilot editor config."""
     # Priority 1: GITHUB_TOKEN env var
@@ -477,13 +512,9 @@ def _read_github_oauth_token() -> SentinelToken | None:
         raw = read_confined_text(gh_config, [gh_dir])
     except CredentialFileError:
         raw = ""
-    for line in raw.splitlines():
-        line = line.strip()
-        if line.startswith("oauth_token:"):
-            _, _, val = line.partition(":")
-            val = val.strip().strip("\"'")
-            if val:
-                return SentinelToken(val)
+    gh_token = _gh_hosts_token(raw)
+    if gh_token:
+        return SentinelToken(gh_token)
 
     apps_json = _expand_home("~/.config/github-copilot/apps.json")
     token = _read_oauth_token(apps_json, ["github.com", "oauth_token"],

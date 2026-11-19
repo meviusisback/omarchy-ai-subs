@@ -589,6 +589,78 @@ class TestProductionTrustDefaults(unittest.TestCase):
         os.chmod(os.path.join(self.base, ".config", "gh", "hosts.yml"), 0o644)
         self.assertIsNone(fetch_usage._read_github_oauth_token())
 
+    def test_gh_hosts_reads_github_com_token_when_another_host_comes_first(self):
+        # gh writes one top-level key per host.  Only github.com's token may be
+        # presented to api.github.com; a token that belongs to an enterprise
+        # host would leave its configured origin.
+        self.write(".config/gh/hosts.yml",
+                   "ghe.corp.example.com:\n"
+                   "    user: alberto\n"
+                   "    oauth_token: gho_ENTERPRISE_SECRET\n"
+                   "    git_protocol: https\n"
+                   "github.com:\n"
+                   "    user: alberto\n"
+                   "    oauth_token: gho_personal\n"
+                   "    git_protocol: https\n")
+        token = fetch_usage._read_github_oauth_token()
+        self.assertIsNotNone(token)
+        self.assertEqual(token.value, "gho_personal")
+
+    def test_gh_hosts_reads_github_com_token_when_another_host_comes_last(self):
+        self.write(".config/gh/hosts.yml",
+                   "github.com:\n"
+                   "    oauth_token: gho_personal\n"
+                   "ghe.corp.example.com:\n"
+                   "    oauth_token: gho_ENTERPRISE_SECRET\n")
+        token = fetch_usage._read_github_oauth_token()
+        self.assertIsNotNone(token)
+        self.assertEqual(token.value, "gho_personal")
+
+    def test_gh_hosts_refuses_a_token_owned_by_another_host(self):
+        # No github.com entry at all: the reader must decline rather than hand
+        # an enterprise credential to the public API.
+        self.write(".config/gh/hosts.yml",
+                   "ghe.corp.example.com:\n"
+                   "    user: alberto\n"
+                   "    oauth_token: gho_ENTERPRISE_ONLY\n")
+        self.assertIsNone(fetch_usage._read_github_oauth_token())
+
+    def test_gh_hosts_reads_per_account_token_under_users(self):
+        # Recent gh versions keep a per-account map under users: — nested
+        # tokens still belong to github.com and must be usable.
+        self.write(".config/gh/hosts.yml",
+                   "github.com:\n"
+                   "    user: alberto\n"
+                   "    git_protocol: https\n"
+                   "    users:\n"
+                   "        alberto:\n"
+                   "            oauth_token: gho_account_one\n"
+                   "        work-account:\n"
+                   "            oauth_token: gho_account_two\n")
+        token = fetch_usage._read_github_oauth_token()
+        self.assertIsNotNone(token)
+        self.assertIn(token.value, ("gho_account_one", "gho_account_two"))
+
+    def test_gh_hosts_ignores_another_hosts_users_map(self):
+        self.write(".config/gh/hosts.yml",
+                   "ghe.corp.example.com:\n"
+                   "    users:\n"
+                   "        alberto:\n"
+                   "            oauth_token: gho_ENTERPRISE_NESTED\n"
+                   "github.com:\n"
+                   "    oauth_token: gho_personal\n")
+        token = fetch_usage._read_github_oauth_token()
+        self.assertIsNotNone(token)
+        self.assertEqual(token.value, "gho_personal")
+
+    def test_gh_hosts_stays_quiet_when_no_github_com_entry_exists(self):
+        # apps.json is absent in this fixture, so a declined hosts.yml means no
+        # token at all — never a fallback to whatever the file happens to hold.
+        self.write(".config/gh/hosts.yml",
+                   "bitbucket.example.com:\n"
+                   "    oauth_token: atlassian_looking_token\n")
+        self.assertIsNone(fetch_usage._read_github_oauth_token())
+
     def test_cursor_sqlite_reader_reads_the_token(self):
         db_path = os.path.join(self.base, ".cursor", "state.vscdb")
         os.makedirs(os.path.dirname(db_path), mode=0o700, exist_ok=True)
