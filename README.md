@@ -76,7 +76,7 @@ The value is passed as JSON (`'"Data"'` for a string, `'true'` for a boolean).
 - `python3` (the fetcher uses the standard library only)
 - Internet access (vendor usage/balance APIs; the Nager.Date public-holiday API only while the pricing clock is on; the Bitwarden Secrets Manager API only while that integration is on)
 - API keys in `~/.hermes/.env` (or the native config each provider reuses, or Bitwarden Secrets Manager — see below)
-- GitHub Copilot token in `~/.config/github-copilot/apps.json`, or `GITHUB_TOKEN` / `~/.config/gh/hosts.yml` — Copilot usage only, picked up automatically when one of them exists
+- GitHub Copilot token in `~/.config/github-copilot/apps.json`, or `GITHUB_TOKEN` / the `github.com` entry of `~/.config/gh/hosts.yml` — Copilot usage only, picked up automatically when one of them exists. A token that `gh` stored for another host (a GitHub Enterprise install, say) is never used: `api.github.com` is the only origin this reader feeds.
 - Cursor local state (`~/.cursor/state.vscdb`) — Cursor usage only, opened read-only through SQLite when that file exists
 
 ## Configuration
@@ -106,7 +106,7 @@ Provider → credential mapping (the `hermesEnvFile` keys are loaded into the en
 | alibaba | `DASHSCOPE_API_KEY` | — |
 | arcee | `ARCEE_API_KEY` | — |
 | commandcode | `COMMANDCODE_API_KEY` | — |
-| copilot | — (OAuth token) | `~/.config/github-copilot/apps.json`, `GITHUB_TOKEN`, or `~/.config/gh/hosts.yml` |
+| copilot | — (OAuth token) | `~/.config/github-copilot/apps.json`, `GITHUB_TOKEN`, or the `github.com` entry of `~/.config/gh/hosts.yml` (a token for any other host is ignored) |
 | cursor | — (OAuth token) | `~/.cursor/state.vscdb`, opened read-only |
 
 Key files stay locked down:
@@ -136,9 +136,9 @@ After that the fetcher resolves whatever key the `.env` file does not have by ru
 
 ## How it works
 
-`fetch_usage.py` queries each vendor's own usage/balance endpoint in parallel and emits one JSON document; `Panel.qml` renders the meters, balances and countdowns from it. Credential sources, in order: the keys in the Hermes `.env` you point at with `hermesEnvFile` (loaded into the environment, so they win over same-named exported variables) → Bitwarden Secrets Manager when enabled (fills only what is still missing; off by default, zero extra requests when off) → provider-native files (`~/.deepseek/config.toml`, `~/.kimi-code/config.toml`, the Copilot token file or `GITHUB_TOKEN` / `~/.config/gh/hosts.yml`, Cursor's local SQLite state). No API keys, balances or usage data ever leave your machine except to the vendors' own API endpoints, the Bitwarden Secrets Manager API when that integration is on (and Nager.Date for the holiday list when the pricing clock is on); redirects are followed only within the same origin, so a key is never forwarded to another host or downgraded to plaintext.
+`fetch_usage.py` queries each vendor's own usage/balance endpoint in parallel and emits one JSON document; `Panel.qml` renders the meters, balances and countdowns from it. Credential sources, in order: the keys in the Hermes `.env` you point at with `hermesEnvFile` (loaded into the environment, so they win over same-named exported variables) → Bitwarden Secrets Manager when enabled (fills only what is still missing; off by default, zero extra requests when off) → provider-native files (`~/.deepseek/config.toml`, `~/.kimi-code/config.toml`, the Copilot token file or `GITHUB_TOKEN` / the `github.com` entry of `~/.config/gh/hosts.yml` (a token stored for another host is declined rather than sent to the public API), Cursor's local SQLite state). No API keys, balances or usage data ever leave your machine except to the vendors' own API endpoints, the Bitwarden Secrets Manager API when that integration is on (and Nager.Date for the holiday list when the pricing clock is on); redirects are followed only within the same origin, so a key is never forwarded to another host or downgraded to plaintext.
 
-Verify with `python3 -m unittest discover -s tests` — 83 tests, hermetic.
+Verify with `python3 -m unittest discover -s tests` — 89 tests, hermetic.
 
 ## Removal
 
