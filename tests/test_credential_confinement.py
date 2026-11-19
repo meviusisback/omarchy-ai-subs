@@ -695,6 +695,28 @@ class TestProductionTrustDefaults(unittest.TestCase):
         self.assertIs(copilot["configured"], False)
         self.assertEqual(copilot["error"], "no-token")
 
+        # Positive control: the same harness DOES reach the Copilot fetch path
+        # when a github.com token exists, so the zero-request assertion above
+        # cannot pass just because the fixture was never read.
+        self.write(".config/gh/hosts.yml",
+                   "github.com:\n    user: alberto\n    oauth_token: gho_personal\n")
+        self.assertEqual(fetch_usage._read_github_oauth_token().value, "gho_personal")
+        seen = []
+        spec = dict(copilot_spec)
+        spec["fetch"] = lambda token: seen.append(token.value) or {
+            "error": "no-usage-data"}
+        out2 = io.StringIO()
+        with mock.patch.object(fetch_usage, "_OPENER") as opener, \
+                mock.patch.object(fetch_usage, "PROVIDER_SPECS", [spec]), \
+                mock.patch.object(sys, "argv",
+                                  ["fetch_usage.py", "--env", "/dev/null",
+                                   "--no-holidays"]), \
+                mock.patch.object(sys, "stdout", out2):
+            opener.open.side_effect = refuse
+            fetch_usage.main()
+        self.assertEqual(seen, ["gho_personal"])
+        self.assertEqual(attempted, [])
+
     def test_cursor_sqlite_reader_reads_the_token(self):
         db_path = os.path.join(self.base, ".cursor", "state.vscdb")
         os.makedirs(os.path.dirname(db_path), mode=0o700, exist_ok=True)
@@ -951,6 +973,17 @@ class TestGhHostsTokenParsing(unittest.TestCase):
                 "        alberto:\n            oauth_token: gho_alberto\n"
                 "        work-account:\n            oauth_token: gho_work\n")
         self.assertEqual(self.parse(text), "gho_work")
+
+    def test_a_nested_user_key_does_not_reselect_the_active_account(self):
+        # Only the block's own `user:` names the active account; one buried in a
+        # sub-map must not override it.
+        text = ("github.com:\n"
+                "    user: alice\n"
+                "    users:\n"
+                "        alice:\n            oauth_token: gho_alice\n"
+                "        bob:\n            oauth_token: gho_bob\n"
+                "    meta:\n        user: bob\n")
+        self.assertEqual(self.parse(text), "gho_alice")
 
     def test_falls_back_to_the_first_account_without_a_user_key(self):
         text = ("github.com:\n"

@@ -76,7 +76,7 @@ The value is passed as JSON (`'"Data"'` for a string, `'true'` for a boolean).
 - `python3` (the fetcher uses the standard library only)
 - Internet access (vendor usage/balance APIs; the Nager.Date public-holiday API only while the pricing clock is on; the Bitwarden Secrets Manager API only while that integration is on)
 - API keys in `~/.hermes/.env` (or the native config each provider reuses, or Bitwarden Secrets Manager — see below)
-- GitHub Copilot token in `~/.config/github-copilot/apps.json`, or `GITHUB_TOKEN` / the `github.com` entry of `~/.config/gh/hosts.yml` — Copilot usage only, picked up automatically when one of them exists. A token that `gh` stored for another host (a GitHub Enterprise install, say) is never used: `api.github.com` is the only origin this reader feeds. An exported `GITHUB_TOKEN` is trusted as a github.com credential because its origin cannot be verified, so unset it on a machine that only uses GitHub Enterprise.
+- GitHub Copilot token in `~/.config/github-copilot/apps.json`, or `GITHUB_TOKEN` / the `github.com` entry of `~/.config/gh/hosts.yml` — Copilot usage only, picked up automatically when one of them exists. A token that `gh` stored for another host (a GitHub Enterprise install, say) is never used: `api.github.com` is the only origin this reader feeds. When `gh` holds several accounts for `github.com`, the account its own `user:` entry names is the one read. An exported `GITHUB_TOKEN` — whether you exported it or the Hermes `.env` you point `hermesEnvFile` at supplies it — is trusted as a github.com credential because its origin cannot be verified, so unset it on a machine that only uses GitHub Enterprise.
 - Cursor local state (`~/.cursor/state.vscdb`) — Cursor usage only, opened read-only through SQLite when that file exists
 
 ## Configuration
@@ -138,7 +138,7 @@ After that the fetcher resolves whatever key the `.env` file does not have by ru
 
 `fetch_usage.py` queries each vendor's own usage/balance endpoint in parallel and emits one JSON document; `Panel.qml` renders the meters, balances and countdowns from it. Credential sources, in order: the keys in the Hermes `.env` you point at with `hermesEnvFile` (loaded into the environment, so they win over same-named exported variables) → Bitwarden Secrets Manager when enabled (fills only what is still missing; off by default, zero extra requests when off) → provider-native files (`~/.deepseek/config.toml`, `~/.kimi-code/config.toml`, the Copilot token file, `GITHUB_TOKEN`, or the `github.com` entry of `~/.config/gh/hosts.yml` — a token stored for another host is declined rather than sent to the public API — Cursor's local SQLite state). No API keys, balances or usage data ever leave your machine except to the vendors' own API endpoints, the Bitwarden Secrets Manager API when that integration is on (and Nager.Date for the holiday list when the pricing clock is on); redirects are followed only within the same origin, so a key is never forwarded to another host or downgraded to plaintext.
 
-Verify with `python3 -m unittest discover -s tests` — 103 tests, hermetic.
+Verify with `python3 -m unittest discover -s tests` — 104 tests, hermetic.
 
 ## Removal
 
